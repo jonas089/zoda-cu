@@ -128,10 +128,73 @@ fn precompute_twiddles(
     twiddles
 }
 
+fn precompute_stage_twiddles(
+    n: usize,
+    modulus: Arc<BigUint>,
+    root: &BigUint,
+    r2: &BigUint,
+) -> Vec<Vec<[u64; LIMBS]>> {
+    let log_n = (n as u32).trailing_zeros();
+    let mut stage_twiddles = Vec::with_capacity(log_n as usize);
+
+    for stage in 0..log_n {
+        let step = 1usize << stage;
+        let mut twiddles = Vec::with_capacity(step);
+
+        // For each stage, we need twiddles: omega^0, omega^(n/2^(stage+1)), omega^(2*n/2^(stage+1)), ...
+        let stage_root = root.modpow(&BigUint::from(n / (2 * step)), &modulus);
+        let mut omega = BigUint::one();
+
+        for _ in 0..step {
+            let mont = to_montgomery(&omega, &modulus, r2);
+            let f = F {
+                value: mont,
+                modulus: modulus.clone(),
+            };
+            twiddles.push(f_to_limbs(&f));
+            omega = (&omega * &stage_root) % &*modulus;
+        }
+
+        stage_twiddles.push(twiddles);
+    }
+
+    stage_twiddles
+}
+
+fn precompute_all_twiddles_flat(
+    n: usize,
+    modulus: Arc<BigUint>,
+    root: &BigUint,
+    r2: &BigUint,
+) -> Vec<[u64; LIMBS]> {
+    let log_n = (n as u32).trailing_zeros();
+    let mut all_twiddles = Vec::new();
+
+    for stage in 0..log_n {
+        let step = 1usize << stage;
+
+        // For each stage, we need twiddles: omega^0, omega^(n/2^(stage+1)), omega^(2*n/2^(stage+1)), ...
+        let stage_root = root.modpow(&BigUint::from(n / (2 * step)), &modulus);
+        let mut omega = BigUint::one();
+
+        for _ in 0..step {
+            let mont = to_montgomery(&omega, &modulus, r2);
+            let f = F {
+                value: mont,
+                modulus: modulus.clone(),
+            };
+            all_twiddles.push(f_to_limbs(&f));
+            omega = (&omega * &stage_root) % &*modulus;
+        }
+    }
+
+    all_twiddles
+}
+
 // ---------- GPU runners ----------
-fn run_fft_stagewise(
+fn run_fft_shared_memory(
     device: &Device,
-    fft_pipeline: &ComputePipelineState,
+    shared_fft_pipeline: &ComputePipelineState,
     command_queue: &CommandQueue,
     data_buf: &Buffer,
     twiddle_buf: &Buffer,
@@ -139,10 +202,57 @@ fn run_fft_stagewise(
     nprime_buf: &Buffer,
     n: usize,
 ) {
-    let mut len = 2u32;
-    while len <= n as u32 {
-        let len_buf = device.new_buffer_with_data(
-            unsafe { mem::transmute(&len) },
+    let n_buf = device.new_buffer_with_data(
+        unsafe { mem::transmute(&(n as u32)) },
+        mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+
+    let command_buffer = command_queue.new_command_buffer();
+    let encoder = command_buffer.new_compute_command_encoder();
+
+    encoder.set_compute_pipeline_state(&shared_fft_pipeline);
+    encoder.set_buffer(0, Some(&data_buf), 0);
+    encoder.set_buffer(1, Some(&n_buf), 0);
+    encoder.set_buffer(2, Some(&twiddle_buf), 0);
+    encoder.set_buffer(3, Some(&modulus_buf), 0);
+    encoder.set_buffer(4, Some(&nprime_buf), 0);
+
+    // Use threadgroups of size up to 1024 (MAX_SHARED_SIZE)
+    let max_block_size = 1024.min(n);
+    let num_blocks = (n + max_block_size - 1) / max_block_size;
+
+    let grid = MTLSize {
+        width: num_blocks as u64,
+        height: 1,
+        depth: 1,
+    };
+    let tg = MTLSize {
+        width: max_block_size as u64,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatch_thread_groups(grid, tg);
+    encoder.end_encoding();
+    command_buffer.commit();
+    command_buffer.wait_until_completed();
+}
+
+fn run_fft_butterfly_stages(
+    device: &Device,
+    butterfly_pipeline: &ComputePipelineState,
+    command_queue: &CommandQueue,
+    data_buf: &Buffer,
+    twiddle_bufs: &[Buffer], // One twiddle buffer per stage
+    modulus_buf: &Buffer,
+    nprime_buf: &Buffer,
+    n: usize,
+) {
+    let log_n = (n as u32).trailing_zeros();
+
+    for stage in 0..log_n {
+        let stage_buf = device.new_buffer_with_data(
+            unsafe { mem::transmute(&stage) },
             mem::size_of::<u32>() as u64,
             MTLResourceOptions::StorageModeManaged,
         );
@@ -155,21 +265,25 @@ fn run_fft_stagewise(
         let command_buffer = command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
 
-        encoder.set_compute_pipeline_state(&fft_pipeline);
+        encoder.set_compute_pipeline_state(&butterfly_pipeline);
         encoder.set_buffer(0, Some(&data_buf), 0);
-        encoder.set_buffer(1, Some(&twiddle_buf), 0);
-        encoder.set_buffer(2, Some(&n_buf), 0);
-        encoder.set_buffer(3, Some(&len_buf), 0);
+        encoder.set_buffer(1, Some(&n_buf), 0);
+        encoder.set_buffer(2, Some(&stage_buf), 0);
+        encoder.set_buffer(3, Some(&twiddle_bufs[stage as usize]), 0);
         encoder.set_buffer(4, Some(&modulus_buf), 0);
         encoder.set_buffer(5, Some(&nprime_buf), 0);
 
+        // Number of threads needed: num_groups * step
+        let step = 1usize << stage;
+        let num_groups = n >> (stage + 1);
+        let num_threads = num_groups * step;
         let grid = MTLSize {
-            width: (n as u64 / 2),
+            width: num_threads as u64,
             height: 1,
             depth: 1,
         };
         let tg = MTLSize {
-            width: 64,
+            width: 64.min(num_threads as u64),
             height: 1,
             depth: 1,
         };
@@ -177,8 +291,6 @@ fn run_fft_stagewise(
         encoder.end_encoding();
         command_buffer.commit();
         command_buffer.wait_until_completed();
-
-        len <<= 1;
     }
 }
 
@@ -236,9 +348,14 @@ fn test_fft_ifft_roundtrip_big() {
         .new_library_with_file("./metal/fft-big.metallib")
         .unwrap();
 
-    let fft_kernel = library.get_function("fft_stage", None).unwrap();
-    let fft_pipeline = device
-        .new_compute_pipeline_state_with_function(&fft_kernel)
+    let shared_fft_kernel = library.get_function("fft_shared_memory", None).unwrap();
+    let shared_fft_pipeline = device
+        .new_compute_pipeline_state_with_function(&shared_fft_kernel)
+        .unwrap();
+
+    let butterfly_kernel = library.get_function("butterfly_fft", None).unwrap();
+    let butterfly_pipeline = device
+        .new_compute_pipeline_state_with_function(&butterfly_kernel)
         .unwrap();
 
     let bitrev_kernel = library.get_function("bitrev_permute", None).unwrap();
@@ -282,10 +399,10 @@ fn test_fft_ifft_roundtrip_big() {
         host_data.extend_from_slice(&f_to_limbs(&f));
     }
 
-    // forward twiddles (Montgomery)
-    let tw = precompute_twiddles(n, modulus.clone(), &root, &r2);
-    let mut tw_data: Vec<u64> = Vec::with_capacity(n * LIMBS);
-    for w in &tw {
+    // forward twiddles for shared memory FFT (all stages flattened)
+    let all_twiddles = precompute_all_twiddles_flat(n, modulus.clone(), &root, &r2);
+    let mut tw_data: Vec<u64> = Vec::with_capacity(all_twiddles.len() * LIMBS);
+    for w in &all_twiddles {
         tw_data.extend_from_slice(w);
     }
 
@@ -295,6 +412,7 @@ fn test_fft_ifft_roundtrip_big() {
         (host_data.len() * mem::size_of::<u64>()) as u64,
         MTLResourceOptions::StorageModeManaged,
     );
+
     let twiddle_buf = device.new_buffer_with_data(
         unsafe { mem::transmute(tw_data.as_ptr()) },
         (tw_data.len() * mem::size_of::<u64>()) as u64,
@@ -316,16 +434,47 @@ fn test_fft_ifft_roundtrip_big() {
     if start_time.elapsed().as_secs() >= 5 {
         panic!("Test timeout");
     }
-    run_fft_stagewise(
-        &device,
-        &fft_pipeline,
-        &command_queue,
-        &data_buf,
-        &twiddle_buf,
-        &modulus_buf,
-        &nprime_buf,
-        n,
-    );
+
+    // Use shared memory FFT for better performance
+    if n <= 1024 {
+        run_fft_shared_memory(
+            &device,
+            &shared_fft_pipeline,
+            &command_queue,
+            &data_buf,
+            &twiddle_buf,
+            &modulus_buf,
+            &nprime_buf,
+            n,
+        );
+    } else {
+        // Fallback to stage-wise approach for larger FFTs
+        let stage_twiddles = precompute_stage_twiddles(n, modulus.clone(), &root, &r2);
+        let mut twiddle_bufs = Vec::new();
+        for stage_tw in &stage_twiddles {
+            let mut stage_tw_data: Vec<u64> = Vec::with_capacity(stage_tw.len() * LIMBS);
+            for w in stage_tw {
+                stage_tw_data.extend_from_slice(w);
+            }
+            let stage_twiddle_buf = device.new_buffer_with_data(
+                unsafe { mem::transmute(stage_tw_data.as_ptr()) },
+                (stage_tw_data.len() * mem::size_of::<u64>()) as u64,
+                MTLResourceOptions::StorageModeManaged,
+            );
+            twiddle_bufs.push(stage_twiddle_buf);
+        }
+
+        run_fft_butterfly_stages(
+            &device,
+            &butterfly_pipeline,
+            &command_queue,
+            &data_buf,
+            &twiddle_bufs,
+            &modulus_buf,
+            &nprime_buf,
+            n,
+        );
+    }
 
     // Bit-reverse output of FFT for IFFT input
     run_bitrev(&device, &bitrev_pipeline, &command_queue, &data_buf, n);
@@ -344,31 +493,63 @@ fn test_fft_ifft_roundtrip_big() {
     // ---------- inverse FFT twiddles ----------
     // Inverse root: root^(-1) = root^(p-2) mod p (since p is prime)
     let inv_root = root.modpow(&(modulus.deref() - BigUint::from(2u32)), &modulus);
-    let itw = precompute_twiddles(n, modulus.clone(), &inv_root, &r2);
-    let mut itw_data: Vec<u64> = Vec::with_capacity(n * LIMBS);
-    for w in &itw {
-        itw_data.extend_from_slice(w);
-    }
-    let itw_buf = device.new_buffer_with_data(
-        unsafe { mem::transmute(itw_data.as_ptr()) },
-        (itw_data.len() * mem::size_of::<u64>()) as u64,
-        MTLResourceOptions::StorageModeManaged,
-    );
 
     // ---------- inverse FFT ----------
     if start_time.elapsed().as_secs() >= 5 {
         panic!("Test timeout");
     }
-    run_fft_stagewise(
-        &device,
-        &fft_pipeline,
-        &command_queue,
-        &data_buf,
-        &itw_buf,
-        &modulus_buf,
-        &nprime_buf,
-        n,
-    );
+
+    if n <= 1024 {
+        // Use shared memory FFT for inverse
+        let inv_all_twiddles = precompute_all_twiddles_flat(n, modulus.clone(), &inv_root, &r2);
+        let mut inv_tw_data: Vec<u64> = Vec::with_capacity(inv_all_twiddles.len() * LIMBS);
+        for w in &inv_all_twiddles {
+            inv_tw_data.extend_from_slice(w);
+        }
+        let inv_twiddle_buf = device.new_buffer_with_data(
+            unsafe { mem::transmute(inv_tw_data.as_ptr()) },
+            (inv_tw_data.len() * mem::size_of::<u64>()) as u64,
+            MTLResourceOptions::StorageModeManaged,
+        );
+
+        run_fft_shared_memory(
+            &device,
+            &shared_fft_pipeline,
+            &command_queue,
+            &data_buf,
+            &inv_twiddle_buf,
+            &modulus_buf,
+            &nprime_buf,
+            n,
+        );
+    } else {
+        // Fallback to stage-wise approach for larger FFTs
+        let inv_stage_twiddles = precompute_stage_twiddles(n, modulus.clone(), &inv_root, &r2);
+        let mut inv_twiddle_bufs = Vec::new();
+        for stage_tw in &inv_stage_twiddles {
+            let mut tw_data: Vec<u64> = Vec::with_capacity(stage_tw.len() * LIMBS);
+            for w in stage_tw {
+                tw_data.extend_from_slice(w);
+            }
+            let twiddle_buf = device.new_buffer_with_data(
+                unsafe { mem::transmute(tw_data.as_ptr()) },
+                (tw_data.len() * mem::size_of::<u64>()) as u64,
+                MTLResourceOptions::StorageModeManaged,
+            );
+            inv_twiddle_bufs.push(twiddle_buf);
+        }
+
+        run_fft_butterfly_stages(
+            &device,
+            &butterfly_pipeline,
+            &command_queue,
+            &data_buf,
+            &inv_twiddle_bufs,
+            &modulus_buf,
+            &nprime_buf,
+            n,
+        );
+    }
 
     // IFFT output should be in natural order
 

@@ -2,6 +2,7 @@
 using namespace metal;
 
 #define LIMBS 4   // 256-bit modulus (4 x 64-bit limbs)
+#define MAX_SHARED_SIZE 1024  // Maximum elements in shared memory
 
 // -----------------------------------------------------------
 // basic helpers
@@ -158,59 +159,169 @@ inline void mont_mul(thread ulong*       r,
     }
 }
 
-inline void mul_mod(thread ulong*       r,
-                    thread const ulong* a,
-                    thread const ulong* b,
-                    thread const ulong* m,
-                    ulong nprime) {
-    mont_mul(r, a, b, m, nprime);
+// -----------------------------------------------------------
+// Shared Memory FFT Kernel - cuFFT style
+// -----------------------------------------------------------
+kernel void fft_shared_memory(
+    device ulong*       data,           // Input/output data array
+    constant uint&      n,              // Total size of FFT
+    device const ulong* twiddles,       // All twiddle factors (organized by stage)
+    constant ulong*     modulus,        // Modulus
+    constant ulong&     nprime,         // Montgomery parameter
+    uint tid [[thread_position_in_grid]],
+    uint local_id [[thread_position_in_threadgroup]],
+    uint group_id [[threadgroup_position_in_grid]]
+) {
+    // Use threadgroup memory (shared memory equivalent)
+    threadgroup ulong shared_data[MAX_SHARED_SIZE * LIMBS];
+    
+    uint block_size = min(n, uint(MAX_SHARED_SIZE));
+    uint num_blocks = (n + block_size - 1) / block_size;
+    
+    if (group_id >= num_blocks) return;
+    
+    uint block_start = group_id * block_size;
+    uint block_end = min(block_start + block_size, n);
+    uint actual_block_size = block_end - block_start;
+    
+    // Load modulus into thread memory
+    thread ulong m[LIMBS];
+    for (int k = 0; k < LIMBS; ++k) {
+        m[k] = modulus[k];
+    }
+    
+    // Load data into shared memory
+    if (local_id < actual_block_size) {
+        uint global_idx = block_start + local_id;
+        for (int k = 0; k < LIMBS; ++k) {
+            shared_data[local_id * LIMBS + k] = data[global_idx * LIMBS + k];
+        }
+    }
+    
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Perform FFT stages in shared memory
+    uint log_block_size = 0;
+    uint temp_size = actual_block_size;
+    while (temp_size > 1) {
+        log_block_size++;
+        temp_size >>= 1;
+    }
+    
+    uint twiddle_offset = 0;
+    
+    for (uint stage = 0; stage < log_block_size; ++stage) {
+        uint step = 1u << stage;
+        uint num_groups_in_block = actual_block_size >> (stage + 1);
+        
+        if (local_id < num_groups_in_block * step) {
+            uint group = local_id / step;
+            uint pos = local_id % step;
+            uint i = group * (step << 1) + pos;
+            uint j = i + step;
+            
+            if (j < actual_block_size) {
+                // Load twiddle factor
+                thread ulong w[LIMBS];
+                for (int k = 0; k < LIMBS; ++k) {
+                    w[k] = twiddles[(twiddle_offset + pos) * LIMBS + k];
+                }
+                
+                // Load data from shared memory
+                thread ulong u[LIMBS], v[LIMBS];
+                for (int k = 0; k < LIMBS; ++k) {
+                    u[k] = shared_data[i * LIMBS + k];
+                    v[k] = shared_data[j * LIMBS + k];
+                }
+                
+                // Butterfly operation
+                thread ulong temp[LIMBS];
+                mont_mul(temp, v, w, m, nprime);
+                
+                thread ulong u_new[LIMBS], v_new[LIMBS];
+                add_mod(u_new, u, temp, m);
+                sub_mod(v_new, u, temp, m);
+                
+                // Store back to shared memory
+                for (int k = 0; k < LIMBS; ++k) {
+                    shared_data[i * LIMBS + k] = u_new[k];
+                    shared_data[j * LIMBS + k] = v_new[k];
+                }
+            }
+        }
+        
+        twiddle_offset += step;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    
+    // Write results back to global memory
+    if (local_id < actual_block_size) {
+        uint global_idx = block_start + local_id;
+        for (int k = 0; k < LIMBS; ++k) {
+            data[global_idx * LIMBS + k] = shared_data[local_id * LIMBS + k];
+        }
+    }
 }
 
 // -----------------------------------------------------------
-// FFT stage (DIT): expects bit-reversed input; outputs natural order
+// Simple Butterfly Kernel - for fallback or large FFTs
 // -----------------------------------------------------------
-kernel void fft_stage(
-    device ulong*       data,
-    device const ulong* twiddles,
-    constant uint&      n,
-    constant uint&      len,
-    constant ulong*     modulus,
-    constant ulong&     nprime,
+kernel void butterfly_fft(
+    device ulong*       data,           // Input/output data array
+    constant uint&      n,              // Total size of FFT
+    constant uint&      stage,          // Current stage (0, 1, 2, ...)
+    device const ulong* twiddles,       // Twiddle factors for this stage
+    constant ulong*     modulus,        // Modulus
+    constant ulong&     nprime,         // Montgomery parameter
     uint tid [[thread_position_in_grid]]
 ) {
-    uint half_len = len >> 1;
-    uint group    = tid / half_len;
-    uint pos      = tid % half_len;
-    uint i        = group * len + pos;
-    if (i + half_len >= n) return;
-
-    uint step = n / len;
-
+    uint step = 1u << stage;           // Distance between butterfly elements
+    uint num_groups = n >> (stage + 1); // Number of groups in this stage
+    
+    if (tid >= num_groups * step) return;
+    
+    // Calculate butterfly indices
+    uint group = tid / step;
+    uint pos = tid % step;
+    uint i = group * (step << 1) + pos;
+    uint j = i + step;
+    
+    if (j >= n) return;
+    
+    // Load modulus
     thread ulong m[LIMBS];
-    for (int k=0; k<LIMBS; ++k) m[k] = modulus[k];
-
+    for (int k = 0; k < LIMBS; ++k) {
+        m[k] = modulus[k];
+    }
+    
+    // Load twiddle factor for this butterfly position
     thread ulong w[LIMBS];
-    uint tw_idx = pos * step;
-    for (int k=0; k<LIMBS; ++k) {
-        w[k] = twiddles[tw_idx * LIMBS + k];
+    for (int k = 0; k < LIMBS; ++k) {
+        w[k] = twiddles[pos * LIMBS + k];
     }
-
+    
+    // Load data elements
     thread ulong u[LIMBS], v[LIMBS];
-    for (int k=0; k<LIMBS; ++k) {
-        u[k] = data[i*LIMBS + k];
-        v[k] = data[(i+half_len)*LIMBS + k];
+    for (int k = 0; k < LIMBS; ++k) {
+        u[k] = data[i * LIMBS + k];
+        v[k] = data[j * LIMBS + k];
     }
-
-    thread ulong vtmp[LIMBS];
-    mul_mod(vtmp, v, w, m, nprime);
-
-    thread ulong a[LIMBS], b[LIMBS];
-    add_mod(a, u, vtmp, m);
-    sub_mod(b, u, vtmp, m);
-
-    for (int k=0; k<LIMBS; ++k) {
-        data[i*LIMBS + k]         = a[k];
-        data[(i+half_len)*LIMBS + k] = b[k];
+    
+    // Butterfly operation: 
+    // temp = v * w
+    // u' = u + temp
+    // v' = u - temp
+    thread ulong temp[LIMBS];
+    mont_mul(temp, v, w, m, nprime);
+    
+    thread ulong u_new[LIMBS], v_new[LIMBS];
+    add_mod(u_new, u, temp, m);
+    sub_mod(v_new, u, temp, m);
+    
+    // Store results
+    for (int k = 0; k < LIMBS; ++k) {
+        data[i * LIMBS + k] = u_new[k];
+        data[j * LIMBS + k] = v_new[k];
     }
 }
 
