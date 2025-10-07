@@ -5,9 +5,9 @@ use num_integer::Integer;
 use num_traits::{One, Zero};
 use std::{mem, ops::Deref, sync::Arc};
 
-const LIMBS: usize = 4;
+pub const LIMBS: usize = 4;
 
-fn f_to_limbs(x: &F) -> [u64; LIMBS] {
+pub fn f_to_limbs(x: &F) -> [u64; LIMBS] {
     let mut bytes = x.value.to_bytes_le();
     bytes.resize(LIMBS * 8, 0);
     let mut limbs = [0u64; LIMBS];
@@ -17,7 +17,7 @@ fn f_to_limbs(x: &F) -> [u64; LIMBS] {
     limbs
 }
 
-fn limbs_to_f(limbs: &[u64; LIMBS], modulus: Arc<BigUint>) -> F {
+pub fn limbs_to_f(limbs: &[u64; LIMBS], modulus: Arc<BigUint>) -> F {
     let mut bytes = Vec::with_capacity(LIMBS * 8);
     for limb in limbs {
         bytes.extend_from_slice(&limb.to_le_bytes());
@@ -28,7 +28,7 @@ fn limbs_to_f(limbs: &[u64; LIMBS], modulus: Arc<BigUint>) -> F {
     }
 }
 
-fn biguint_to_limbs(x: &BigUint) -> [u64; LIMBS] {
+pub fn biguint_to_limbs(x: &BigUint) -> [u64; LIMBS] {
     let mut bytes = x.to_bytes_le();
     bytes.resize(LIMBS * 8, 0);
     let mut limbs = [0u64; LIMBS];
@@ -38,7 +38,7 @@ fn biguint_to_limbs(x: &BigUint) -> [u64; LIMBS] {
     limbs
 }
 
-fn compute_montgomery_params(modulus: &BigUint) -> (u64, BigUint) {
+pub fn compute_montgomery_params(modulus: &BigUint) -> (u64, BigUint) {
     let m0 = modulus.to_u64_digits()[0];
     assert!(m0 & 1 == 1, "modulus must be odd");
 
@@ -62,7 +62,7 @@ fn modinv64(a: u64) -> u64 {
     inv as u64
 }
 
-fn to_montgomery(x: &BigUint, modulus: &BigUint, r2: &BigUint) -> BigUint {
+pub fn to_montgomery(x: &BigUint, modulus: &BigUint, r2: &BigUint) -> BigUint {
     // To convert x to Montgomery form: mont_mul(x, R^2) where R^2 is precomputed
     // But we're not using montgomery multiplication here - we're just doing regular multiplication
     // The GPU expects us to pass values that are already in Montgomery form after this step
@@ -72,7 +72,7 @@ fn to_montgomery(x: &BigUint, modulus: &BigUint, r2: &BigUint) -> BigUint {
     (x * r) % modulus
 }
 
-fn from_montgomery(x: &BigUint, modulus: &BigUint, nprime: u64) -> BigUint {
+pub fn from_montgomery(x: &BigUint, modulus: &BigUint, nprime: u64) -> BigUint {
     // Use the modular inverse from num-integer
     let r_bits = 64 * LIMBS;
     let r = BigUint::one() << r_bits;
@@ -83,7 +83,7 @@ fn from_montgomery(x: &BigUint, modulus: &BigUint, nprime: u64) -> BigUint {
 }
 
 // ---------- bit reversal ----------
-fn bitreverse_permute<T>(values: &mut [T]) {
+pub fn bitreverse_permute<T>(values: &mut [T]) {
     let n = values.len();
     let log_n = n.trailing_zeros();
     for i in 0..n {
@@ -95,7 +95,7 @@ fn bitreverse_permute<T>(values: &mut [T]) {
 }
 
 // ---------- roots and twiddles ----------
-fn find_root_of_unity(n: usize, p: &BigUint) -> BigUint {
+pub fn find_root_of_unity(n: usize, p: &BigUint) -> BigUint {
     let exp = (p - 1u32) / BigUint::from(n as u64);
     for g in [3u32, 5u32, 7u32, 11u32, 13u32] {
         let candidate = BigUint::from(g).modpow(&exp, p);
@@ -161,7 +161,7 @@ fn precompute_stage_twiddles(
     stage_twiddles
 }
 
-fn precompute_all_twiddles_flat(
+pub fn precompute_all_twiddles_flat(
     n: usize,
     modulus: Arc<BigUint>,
     root: &BigUint,
@@ -192,7 +192,7 @@ fn precompute_all_twiddles_flat(
 }
 
 // ---------- GPU runners ----------
-fn run_fft_shared_memory(
+pub fn run_fft_shared_memory(
     device: &Device,
     shared_fft_pipeline: &ComputePipelineState,
     command_queue: &CommandQueue,
@@ -294,7 +294,7 @@ fn run_fft_butterfly_stages(
     }
 }
 
-fn run_bitrev(
+pub fn run_bitrev(
     device: &Device,
     bitrev_pipeline: &ComputePipelineState,
     command_queue: &CommandQueue,
@@ -479,15 +479,12 @@ fn test_fft_ifft_roundtrip_big() {
     // Bit-reverse output of FFT for IFFT input
     run_bitrev(&device, &bitrev_pipeline, &command_queue, &data_buf, n);
 
-    // Debug: check data after forward FFT
-    println!("After forward FFT (first 4 coeffs in Montgomery):");
     let ptr = data_buf.contents() as *const u64;
     let raw = unsafe { std::slice::from_raw_parts(ptr, n * LIMBS) };
     for i in 0..4 {
         let mut limb_block = [0u64; LIMBS];
         limb_block.copy_from_slice(&raw[i * LIMBS..(i + 1) * LIMBS]);
         let f_mont = limbs_to_f(&limb_block, modulus.clone());
-        println!("  FFT[{}] = {}", i, f_mont.value);
     }
 
     // ---------- inverse FFT twiddles ----------
@@ -552,7 +549,6 @@ fn test_fft_ifft_roundtrip_big() {
     }
 
     // IFFT output should be in natural order
-
     // ---------- read back and scale ----------
     let ptr = data_buf.contents() as *const u64;
     let raw = unsafe { std::slice::from_raw_parts(ptr, n * LIMBS) };
@@ -573,15 +569,6 @@ fn test_fft_ifft_roundtrip_big() {
         });
     }
 
-    // ---------- debug output ----------
-    println!("Expected: [7, 3, 5, 0, 0, ...]");
-    println!("Actual first 8 coeffs:");
-    for (i, coeff) in results.iter().take(8).enumerate() {
-        println!("  [{}] = {}", i, coeff.value);
-    }
-
-    // ---------- assertions ----------
-    // At least verify that the constant term works correctly
     assert!(
         results[0].equals(&F::new(7, modulus.clone())),
         "Expected results[0] = 7, got {}",
