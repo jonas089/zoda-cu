@@ -7,6 +7,15 @@ use std::{mem, ops::Deref, sync::Arc};
 
 pub const LIMBS: usize = 4;
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FieldElem {
+    pub x: u64,
+    pub y: u64,
+    pub z: u64,
+    pub w: u64,
+}
+
 pub fn f_to_limbs(x: &F) -> [u64; LIMBS] {
     let mut bytes = x.value.to_bytes_le();
     bytes.resize(LIMBS * 8, 0);
@@ -191,6 +200,40 @@ pub fn precompute_all_twiddles_flat(
     all_twiddles
 }
 
+// New function for 2-D twiddle layout supporting batched FFTs
+pub fn precompute_all_twiddles_2d(
+    n: usize,
+    batch_size: usize,
+    modulus: Arc<BigUint>,
+    root: &BigUint,
+    r2: &BigUint,
+) -> Vec<[u64; LIMBS]> {
+    let log_n = (n as u32).trailing_zeros();
+    let total_twiddles_per_fft = (n - 1); // Total twiddles needed per FFT
+    let mut all_twiddles = Vec::with_capacity(batch_size * total_twiddles_per_fft);
+
+    // Replicate twiddles for each FFT in the batch
+    for _fft_id in 0..batch_size {
+        for stage in 0..log_n {
+            let step = 1usize << stage;
+            let stage_root = root.modpow(&BigUint::from(n / (2 * step)), &modulus);
+            let mut omega = BigUint::one();
+
+            for _ in 0..step {
+                let mont = to_montgomery(&omega, &modulus, r2);
+                let f = F {
+                    value: mont,
+                    modulus: modulus.clone(),
+                };
+                all_twiddles.push(f_to_limbs(&f));
+                omega = (&omega * &stage_root) % &*modulus;
+            }
+        }
+    }
+
+    all_twiddles
+}
+
 // ---------- GPU runners ----------
 pub fn run_fft_shared_memory(
     device: &Device,
@@ -202,8 +245,38 @@ pub fn run_fft_shared_memory(
     nprime_buf: &Buffer,
     n: usize,
 ) {
+    run_fft_shared_memory_batched(
+        device,
+        shared_fft_pipeline,
+        command_queue,
+        data_buf,
+        twiddle_buf,
+        modulus_buf,
+        nprime_buf,
+        n,
+        1, // batch_size = 1 for backward compatibility
+    )
+}
+
+pub fn run_fft_shared_memory_batched(
+    device: &Device,
+    shared_fft_pipeline: &ComputePipelineState,
+    command_queue: &CommandQueue,
+    data_buf: &Buffer,
+    twiddle_buf: &Buffer,
+    modulus_buf: &Buffer,
+    nprime_buf: &Buffer,
+    n: usize,
+    batch_size: usize,
+) {
     let n_buf = device.new_buffer_with_data(
         unsafe { mem::transmute(&(n as u32)) },
+        mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+
+    let batch_size_buf = device.new_buffer_with_data(
+        unsafe { mem::transmute(&(batch_size as u32)) },
         mem::size_of::<u32>() as u64,
         MTLResourceOptions::StorageModeManaged,
     );
@@ -214,16 +287,18 @@ pub fn run_fft_shared_memory(
     encoder.set_compute_pipeline_state(&shared_fft_pipeline);
     encoder.set_buffer(0, Some(&data_buf), 0);
     encoder.set_buffer(1, Some(&n_buf), 0);
-    encoder.set_buffer(2, Some(&twiddle_buf), 0);
-    encoder.set_buffer(3, Some(&modulus_buf), 0);
-    encoder.set_buffer(4, Some(&nprime_buf), 0);
+    encoder.set_buffer(2, Some(&batch_size_buf), 0);
+    encoder.set_buffer(3, Some(&twiddle_buf), 0);
+    encoder.set_buffer(4, Some(&modulus_buf), 0);
+    encoder.set_buffer(5, Some(&nprime_buf), 0);
 
-    // Use threadgroups of size up to 1024 (MAX_SHARED_SIZE)
-    let max_block_size = 1024.min(n);
-    let num_blocks = (n + max_block_size - 1) / max_block_size;
+    // Use threadgroups of size up to 256 (MAX_SHARED_SIZE) - optimized for M1/M2/M3
+    let max_block_size = 256.min(n);
+    let num_blocks_per_fft = (n + max_block_size - 1) / max_block_size;
+    let total_blocks = num_blocks_per_fft * batch_size;
 
     let grid = MTLSize {
-        width: num_blocks as u64,
+        width: total_blocks as u64,
         height: 1,
         depth: 1,
     };
@@ -248,6 +323,30 @@ fn run_fft_butterfly_stages(
     nprime_buf: &Buffer,
     n: usize,
 ) {
+    run_fft_butterfly_stages_batched(
+        device,
+        butterfly_pipeline,
+        command_queue,
+        data_buf,
+        twiddle_bufs,
+        modulus_buf,
+        nprime_buf,
+        n,
+        1, // batch_size = 1 for backward compatibility
+    )
+}
+
+fn run_fft_butterfly_stages_batched(
+    device: &Device,
+    butterfly_pipeline: &ComputePipelineState,
+    command_queue: &CommandQueue,
+    data_buf: &Buffer,
+    twiddle_bufs: &[Buffer], // One twiddle buffer per stage
+    modulus_buf: &Buffer,
+    nprime_buf: &Buffer,
+    n: usize,
+    batch_size: usize,
+) {
     let log_n = (n as u32).trailing_zeros();
 
     for stage in 0..log_n {
@@ -261,6 +360,11 @@ fn run_fft_butterfly_stages(
             mem::size_of::<u32>() as u64,
             MTLResourceOptions::StorageModeManaged,
         );
+        let batch_size_buf = device.new_buffer_with_data(
+            unsafe { mem::transmute(&(batch_size as u32)) },
+            mem::size_of::<u32>() as u64,
+            MTLResourceOptions::StorageModeManaged,
+        );
 
         let command_buffer = command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
@@ -268,22 +372,24 @@ fn run_fft_butterfly_stages(
         encoder.set_compute_pipeline_state(&butterfly_pipeline);
         encoder.set_buffer(0, Some(&data_buf), 0);
         encoder.set_buffer(1, Some(&n_buf), 0);
-        encoder.set_buffer(2, Some(&stage_buf), 0);
-        encoder.set_buffer(3, Some(&twiddle_bufs[stage as usize]), 0);
-        encoder.set_buffer(4, Some(&modulus_buf), 0);
-        encoder.set_buffer(5, Some(&nprime_buf), 0);
+        encoder.set_buffer(2, Some(&batch_size_buf), 0);
+        encoder.set_buffer(3, Some(&stage_buf), 0);
+        encoder.set_buffer(4, Some(&twiddle_bufs[stage as usize]), 0);
+        encoder.set_buffer(5, Some(&modulus_buf), 0);
+        encoder.set_buffer(6, Some(&nprime_buf), 0);
 
-        // Number of threads needed: num_groups * step
+        // Number of threads needed: (num_groups * step) * batch_size
         let step = 1usize << stage;
         let num_groups = n >> (stage + 1);
-        let num_threads = num_groups * step;
+        let threads_per_fft = num_groups * step;
+        let total_threads = threads_per_fft * batch_size;
         let grid = MTLSize {
-            width: num_threads as u64,
+            width: total_threads as u64,
             height: 1,
             depth: 1,
         };
         let tg = MTLSize {
-            width: 64.min(num_threads as u64),
+            width: 64.min(total_threads as u64),
             height: 1,
             depth: 1,
         };
@@ -301,8 +407,24 @@ pub fn run_bitrev(
     data_buf: &Buffer,
     n: usize,
 ) {
+    run_bitrev_batched(device, bitrev_pipeline, command_queue, data_buf, n, 1)
+}
+
+pub fn run_bitrev_batched(
+    device: &Device,
+    bitrev_pipeline: &ComputePipelineState,
+    command_queue: &CommandQueue,
+    data_buf: &Buffer,
+    n: usize,
+    batch_size: usize,
+) {
     let n_buf = device.new_buffer_with_data(
         unsafe { mem::transmute(&(n as u32)) },
+        mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+    let batch_size_buf = device.new_buffer_with_data(
+        unsafe { mem::transmute(&(batch_size as u32)) },
         mem::size_of::<u32>() as u64,
         MTLResourceOptions::StorageModeManaged,
     );
@@ -319,10 +441,12 @@ pub fn run_bitrev(
     encoder.set_compute_pipeline_state(bitrev_pipeline);
     encoder.set_buffer(0, Some(data_buf), 0);
     encoder.set_buffer(1, Some(&n_buf), 0);
-    encoder.set_buffer(2, Some(&logn_buf), 0);
+    encoder.set_buffer(2, Some(&batch_size_buf), 0);
+    encoder.set_buffer(3, Some(&logn_buf), 0);
 
+    let total_elements = n * batch_size;
     let grid = MTLSize {
-        width: n as u64,
+        width: total_elements as u64,
         height: 1,
         depth: 1,
     };
@@ -335,6 +459,328 @@ pub fn run_bitrev(
     encoder.end_encoding();
     command_buffer.commit();
     command_buffer.wait_until_completed();
+}
+
+// ---------- High-performance batched FFT runner ----------
+pub fn run_batched_fft_operations_async(
+    device: &Device,
+    shared_fft_pipeline: &ComputePipelineState,
+    bitrev_pipeline: &ComputePipelineState,
+    command_queue: &CommandQueue,
+    data_buf: &Buffer,
+    twiddle_buf: &Buffer,
+    inv_twiddle_buf: &Buffer,
+    modulus_buf: &Buffer,
+    nprime_buf: &Buffer,
+    n: usize,
+    batch_size: usize,
+) {
+    // Pre-allocate parameter buffers to avoid repeated allocations
+    let n_buf = device.new_buffer_with_data(
+        unsafe { mem::transmute(&(n as u32)) },
+        mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+    let batch_size_buf = device.new_buffer_with_data(
+        unsafe { mem::transmute(&(batch_size as u32)) },
+        mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+    let logn: u32 = (n as u32).trailing_zeros();
+    let logn_buf = device.new_buffer_with_data(
+        unsafe { mem::transmute(&logn) },
+        mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+
+    // Create a single command buffer for the entire batch operation
+    let command_buffer = command_queue.new_command_buffer();
+
+    // Forward FFT
+    {
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&shared_fft_pipeline);
+        encoder.set_buffer(0, Some(&data_buf), 0);
+        encoder.set_buffer(1, Some(&n_buf), 0);
+        encoder.set_buffer(2, Some(&batch_size_buf), 0);
+        encoder.set_buffer(3, Some(&twiddle_buf), 0);
+        encoder.set_buffer(4, Some(&modulus_buf), 0);
+        encoder.set_buffer(5, Some(&nprime_buf), 0);
+
+        let max_block_size = 256.min(n);
+        let num_blocks_per_fft = (n + max_block_size - 1) / max_block_size;
+        let total_blocks = num_blocks_per_fft * batch_size;
+
+        let grid = MTLSize {
+            width: total_blocks as u64,
+            height: 1,
+            depth: 1,
+        };
+        let tg = MTLSize {
+            width: max_block_size as u64,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(grid, tg);
+        encoder.end_encoding();
+    }
+
+    // Bit-reverse
+    {
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&bitrev_pipeline);
+        encoder.set_buffer(0, Some(&data_buf), 0);
+        encoder.set_buffer(1, Some(&n_buf), 0);
+        encoder.set_buffer(2, Some(&batch_size_buf), 0);
+        encoder.set_buffer(3, Some(&logn_buf), 0);
+
+        let total_elements = n * batch_size;
+        let grid = MTLSize {
+            width: total_elements as u64,
+            height: 1,
+            depth: 1,
+        };
+        let tg = MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(grid, tg);
+        encoder.end_encoding();
+    }
+
+    // Inverse FFT
+    {
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&shared_fft_pipeline);
+        encoder.set_buffer(0, Some(&data_buf), 0);
+        encoder.set_buffer(1, Some(&n_buf), 0);
+        encoder.set_buffer(2, Some(&batch_size_buf), 0);
+        encoder.set_buffer(3, Some(&inv_twiddle_buf), 0);
+        encoder.set_buffer(4, Some(&modulus_buf), 0);
+        encoder.set_buffer(5, Some(&nprime_buf), 0);
+
+        let max_block_size = 256.min(n);
+        let num_blocks_per_fft = (n + max_block_size - 1) / max_block_size;
+        let total_blocks = num_blocks_per_fft * batch_size;
+
+        let grid = MTLSize {
+            width: total_blocks as u64,
+            height: 1,
+            depth: 1,
+        };
+        let tg = MTLSize {
+            width: max_block_size as u64,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(grid, tg);
+        encoder.end_encoding();
+    }
+
+    // Final bit-reverse to get natural order output (DIT: Forward→Bitrev→Inverse→Bitrev)
+    {
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&bitrev_pipeline);
+        encoder.set_buffer(0, Some(&data_buf), 0);
+        encoder.set_buffer(1, Some(&n_buf), 0);
+        encoder.set_buffer(2, Some(&batch_size_buf), 0);
+        encoder.set_buffer(3, Some(&logn_buf), 0);
+
+        let total_elements = n * batch_size;
+        let grid = MTLSize {
+            width: total_elements as u64,
+            height: 1,
+            depth: 1,
+        };
+        let tg = MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(grid, tg);
+        encoder.end_encoding();
+    }
+
+    // Submit the entire batch asynchronously - NO wait_until_completed!
+    command_buffer.commit();
+    // For truly async operation, caller can check command_buffer.status() or use completion handlers
+}
+
+// Version that waits for completion (for accurate benchmarking)
+pub fn run_batched_fft_operations_async_and_wait(
+    device: &Device,
+    shared_fft_pipeline: &ComputePipelineState,
+    bitrev_pipeline: &ComputePipelineState,
+    command_queue: &CommandQueue,
+    data_buf: &Buffer,
+    twiddle_buf: &Buffer,
+    inv_twiddle_buf: &Buffer,
+    modulus_buf: &Buffer,
+    nprime_buf: &Buffer,
+    n: usize,
+    batch_size: usize,
+) {
+    // Pre-allocate parameter buffers to avoid repeated allocations
+    let n_buf = device.new_buffer_with_data(
+        unsafe { mem::transmute(&(n as u32)) },
+        mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+    let batch_size_buf = device.new_buffer_with_data(
+        unsafe { mem::transmute(&(batch_size as u32)) },
+        mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+    let logn: u32 = (n as u32).trailing_zeros();
+    let logn_buf = device.new_buffer_with_data(
+        unsafe { mem::transmute(&logn) },
+        mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+
+    // Create a single command buffer for the entire batch operation
+    let command_buffer = command_queue.new_command_buffer();
+
+    // Forward FFT
+    {
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&shared_fft_pipeline);
+        encoder.set_buffer(0, Some(&data_buf), 0);
+        encoder.set_buffer(1, Some(&n_buf), 0);
+        encoder.set_buffer(2, Some(&batch_size_buf), 0);
+        encoder.set_buffer(3, Some(&twiddle_buf), 0);
+        encoder.set_buffer(4, Some(&modulus_buf), 0);
+        encoder.set_buffer(5, Some(&nprime_buf), 0);
+
+        let max_block_size = 256.min(n);
+        let num_blocks_per_fft = (n + max_block_size - 1) / max_block_size;
+        let total_blocks = num_blocks_per_fft * batch_size;
+
+        let grid = MTLSize {
+            width: total_blocks as u64,
+            height: 1,
+            depth: 1,
+        };
+        let tg = MTLSize {
+            width: max_block_size as u64,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(grid, tg);
+        encoder.end_encoding();
+    }
+
+    // Bit-reverse
+    {
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&bitrev_pipeline);
+        encoder.set_buffer(0, Some(&data_buf), 0);
+        encoder.set_buffer(1, Some(&n_buf), 0);
+        encoder.set_buffer(2, Some(&batch_size_buf), 0);
+        encoder.set_buffer(3, Some(&logn_buf), 0);
+
+        let total_elements = n * batch_size;
+        let grid = MTLSize {
+            width: total_elements as u64,
+            height: 1,
+            depth: 1,
+        };
+        let tg = MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(grid, tg);
+        encoder.end_encoding();
+    }
+
+    // Inverse FFT
+    {
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&shared_fft_pipeline);
+        encoder.set_buffer(0, Some(&data_buf), 0);
+        encoder.set_buffer(1, Some(&n_buf), 0);
+        encoder.set_buffer(2, Some(&batch_size_buf), 0);
+        encoder.set_buffer(3, Some(&inv_twiddle_buf), 0);
+        encoder.set_buffer(4, Some(&modulus_buf), 0);
+        encoder.set_buffer(5, Some(&nprime_buf), 0);
+
+        let max_block_size = 256.min(n);
+        let num_blocks_per_fft = (n + max_block_size - 1) / max_block_size;
+        let total_blocks = num_blocks_per_fft * batch_size;
+
+        let grid = MTLSize {
+            width: total_blocks as u64,
+            height: 1,
+            depth: 1,
+        };
+        let tg = MTLSize {
+            width: max_block_size as u64,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(grid, tg);
+        encoder.end_encoding();
+    }
+
+    // Final bit-reverse to get natural order output (DIT: Forward→Bitrev→Inverse→Bitrev)
+    {
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&bitrev_pipeline);
+        encoder.set_buffer(0, Some(&data_buf), 0);
+        encoder.set_buffer(1, Some(&n_buf), 0);
+        encoder.set_buffer(2, Some(&batch_size_buf), 0);
+        encoder.set_buffer(3, Some(&logn_buf), 0);
+
+        let total_elements = n * batch_size;
+        let grid = MTLSize {
+            width: total_elements as u64,
+            height: 1,
+            depth: 1,
+        };
+        let tg = MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(grid, tg);
+        encoder.end_encoding();
+    }
+
+    // Submit and wait for completion (for accurate benchmarking)
+    command_buffer.commit();
+    command_buffer.wait_until_completed();
+}
+
+// Synchronous version for compatibility
+pub fn run_batched_fft_operations(
+    device: &Device,
+    shared_fft_pipeline: &ComputePipelineState,
+    bitrev_pipeline: &ComputePipelineState,
+    command_queue: &CommandQueue,
+    data_buf: &Buffer,
+    twiddle_buf: &Buffer,
+    inv_twiddle_buf: &Buffer,
+    modulus_buf: &Buffer,
+    nprime_buf: &Buffer,
+    n: usize,
+    batch_size: usize,
+) {
+    // Create the async operation and wait for completion
+    run_batched_fft_operations_async_and_wait(
+        device,
+        shared_fft_pipeline,
+        bitrev_pipeline,
+        command_queue,
+        data_buf,
+        twiddle_buf,
+        inv_twiddle_buf,
+        modulus_buf,
+        nprime_buf,
+        n,
+        batch_size,
+    );
 }
 
 // ---------- test ----------
@@ -399,11 +845,16 @@ fn test_fft_ifft_roundtrip_big() {
         host_data.extend_from_slice(&f_to_limbs(&f));
     }
 
-    // forward twiddles for shared memory FFT (all stages flattened)
+    // forward twiddles for shared memory FFT (all stages flattened) - PROPER FieldElem LAYOUT
     let all_twiddles = precompute_all_twiddles_flat(n, modulus.clone(), &root, &r2);
-    let mut tw_data: Vec<u64> = Vec::with_capacity(all_twiddles.len() * LIMBS);
+    let mut tw_data: Vec<FieldElem> = Vec::with_capacity(all_twiddles.len());
     for w in &all_twiddles {
-        tw_data.extend_from_slice(w);
+        tw_data.push(FieldElem {
+            x: w[0],
+            y: w[1],
+            z: w[2],
+            w: w[3],
+        });
     }
 
     // upload buffers
@@ -414,8 +865,8 @@ fn test_fft_ifft_roundtrip_big() {
     );
 
     let twiddle_buf = device.new_buffer_with_data(
-        unsafe { mem::transmute(tw_data.as_ptr()) },
-        (tw_data.len() * mem::size_of::<u64>()) as u64,
+        tw_data.as_ptr() as *const _,
+        (tw_data.len() * mem::size_of::<FieldElem>()) as u64,
         MTLResourceOptions::StorageModeManaged,
     );
     let modulus_limbs = biguint_to_limbs(&modulus);
@@ -435,8 +886,8 @@ fn test_fft_ifft_roundtrip_big() {
         panic!("Test timeout");
     }
 
-    // Use shared memory FFT for better performance
-    if n <= 1024 {
+    // Use shared memory FFT for smaller sizes, butterfly stages for larger
+    if n <= 256 {
         run_fft_shared_memory(
             &device,
             &shared_fft_pipeline,
@@ -448,17 +899,22 @@ fn test_fft_ifft_roundtrip_big() {
             n,
         );
     } else {
-        // Fallback to stage-wise approach for larger FFTs
+        // Fallback to stage-wise approach for larger FFTs - PROPER FieldElem LAYOUT
         let stage_twiddles = precompute_stage_twiddles(n, modulus.clone(), &root, &r2);
         let mut twiddle_bufs = Vec::new();
         for stage_tw in &stage_twiddles {
-            let mut stage_tw_data: Vec<u64> = Vec::with_capacity(stage_tw.len() * LIMBS);
+            let mut stage_tw_data: Vec<FieldElem> = Vec::with_capacity(stage_tw.len());
             for w in stage_tw {
-                stage_tw_data.extend_from_slice(w);
+                stage_tw_data.push(FieldElem {
+                    x: w[0],
+                    y: w[1],
+                    z: w[2],
+                    w: w[3],
+                });
             }
             let stage_twiddle_buf = device.new_buffer_with_data(
-                unsafe { mem::transmute(stage_tw_data.as_ptr()) },
-                (stage_tw_data.len() * mem::size_of::<u64>()) as u64,
+                stage_tw_data.as_ptr() as *const _,
+                (stage_tw_data.len() * mem::size_of::<FieldElem>()) as u64,
                 MTLResourceOptions::StorageModeManaged,
             );
             twiddle_bufs.push(stage_twiddle_buf);
@@ -496,16 +952,21 @@ fn test_fft_ifft_roundtrip_big() {
         panic!("Test timeout");
     }
 
-    if n <= 1024 {
-        // Use shared memory FFT for inverse
+    if n <= 256 {
+        // Use shared memory FFT for inverse - PROPER FieldElem LAYOUT
         let inv_all_twiddles = precompute_all_twiddles_flat(n, modulus.clone(), &inv_root, &r2);
-        let mut inv_tw_data: Vec<u64> = Vec::with_capacity(inv_all_twiddles.len() * LIMBS);
+        let mut inv_tw_data: Vec<FieldElem> = Vec::with_capacity(inv_all_twiddles.len());
         for w in &inv_all_twiddles {
-            inv_tw_data.extend_from_slice(w);
+            inv_tw_data.push(FieldElem {
+                x: w[0],
+                y: w[1],
+                z: w[2],
+                w: w[3],
+            });
         }
         let inv_twiddle_buf = device.new_buffer_with_data(
-            unsafe { mem::transmute(inv_tw_data.as_ptr()) },
-            (inv_tw_data.len() * mem::size_of::<u64>()) as u64,
+            inv_tw_data.as_ptr() as *const _,
+            (inv_tw_data.len() * mem::size_of::<FieldElem>()) as u64,
             MTLResourceOptions::StorageModeManaged,
         );
 
@@ -520,17 +981,22 @@ fn test_fft_ifft_roundtrip_big() {
             n,
         );
     } else {
-        // Fallback to stage-wise approach for larger FFTs
+        // Fallback to stage-wise approach for larger FFTs - PROPER FieldElem LAYOUT
         let inv_stage_twiddles = precompute_stage_twiddles(n, modulus.clone(), &inv_root, &r2);
         let mut inv_twiddle_bufs = Vec::new();
         for stage_tw in &inv_stage_twiddles {
-            let mut tw_data: Vec<u64> = Vec::with_capacity(stage_tw.len() * LIMBS);
+            let mut tw_data: Vec<FieldElem> = Vec::with_capacity(stage_tw.len());
             for w in stage_tw {
-                tw_data.extend_from_slice(w);
+                tw_data.push(FieldElem {
+                    x: w[0],
+                    y: w[1],
+                    z: w[2],
+                    w: w[3],
+                });
             }
             let twiddle_buf = device.new_buffer_with_data(
-                unsafe { mem::transmute(tw_data.as_ptr()) },
-                (tw_data.len() * mem::size_of::<u64>()) as u64,
+                tw_data.as_ptr() as *const _,
+                (tw_data.len() * mem::size_of::<FieldElem>()) as u64,
                 MTLResourceOptions::StorageModeManaged,
             );
             inv_twiddle_bufs.push(twiddle_buf);
