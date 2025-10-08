@@ -54,6 +54,15 @@ impl Polynomial {
         Polynomial::new(coeffs, self.modulus.clone())
     }
 
+    pub fn from_coeffs(coeffs: Vec<F>) -> Self {
+        assert!(
+            !coeffs.is_empty(),
+            "Polynomial must have at least one coefficient"
+        );
+        let modulus = coeffs[0].modulus.clone();
+        Polynomial::new(coeffs, modulus)
+    }
+
     pub fn interpolate(xs: &[F], ys: &[F]) -> Self {
         assert_eq!(xs.len(), ys.len(), "Mismatched input lengths");
         let n = xs.len();
