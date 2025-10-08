@@ -282,21 +282,12 @@ fn run_zoda_test_gpu(data_size: usize) -> std::time::Duration {
         })
         .collect();
 
-    let extended_domain: Vec<F> = (0..data_square.columns * 5)
-        .map(|i| {
-            F::from_biguint(
-                omega.modpow(&BigUint::from(i as u64), &modulus),
-                modulus.clone(),
-            )
-        })
-        .collect();
-
-    // ----------------------------
-    // 4. GPU-based interpolation of all columns
-    // ----------------------------
+    // same-size FFT domain used later for evaluation
     let batch_size = data_square.columns;
 
-    // --- Pack all columns into one GPU buffer ---
+    // ----------------------------
+    // 4. GPU-based interpolation of all columns (IFFT)
+    // ----------------------------
     let mut host_columns: Vec<FieldElem> = Vec::with_capacity(batch_size * fft_n);
     for col_idx in 0..batch_size {
         let mut column = data_square.get_column(col_idx);
@@ -323,7 +314,7 @@ fn run_zoda_test_gpu(data_size: usize) -> std::time::Duration {
         MTLResourceOptions::StorageModeManaged,
     );
 
-    // --- Precompute inverse FFT twiddles for interpolation ---
+    // Precompute IFFT twiddles
     let inv_twiddles = precompute_all_twiddles_flat(fft_n, modulus.clone(), &inv_omega, &r2);
     let inv_tw_data: Vec<FieldElem> = inv_twiddles
         .iter()
@@ -352,7 +343,7 @@ fn run_zoda_test_gpu(data_size: usize) -> std::time::Duration {
         MTLResourceOptions::StorageModeManaged,
     );
 
-    // --- Run batched inverse FFT (interpolation) ---
+    // Run batched inverse FFT (interpolation)
     run_batched_fft_operations(
         &device,
         &shared_fft_pipeline,
@@ -367,38 +358,60 @@ fn run_zoda_test_gpu(data_size: usize) -> std::time::Duration {
         batch_size,
     );
 
-    // --- Read back interpolated coefficients ---
+    // ----------------------------
+    // 5. GPU-based evaluation via forward FFT
+    // ----------------------------
+    // Precompute *forward* FFT twiddles
+    let fwd_twiddles = precompute_all_twiddles_flat(fft_n, modulus.clone(), &omega, &r2);
+    let fwd_tw_data: Vec<FieldElem> = fwd_twiddles
+        .iter()
+        .map(|w| FieldElem {
+            x: w[0],
+            y: w[1],
+            z: w[2],
+            w: w[3],
+        })
+        .collect();
+    let fwd_twiddle_buf = device.new_buffer_with_data(
+        fwd_tw_data.as_ptr() as *const _,
+        (fwd_tw_data.len() * std::mem::size_of::<FieldElem>()) as u64,
+        MTLResourceOptions::StorageModeManaged,
+    );
+
+    // Run forward FFT in-place (coeffs -> evals)
+    run_batched_fft_operations(
+        &device,
+        &shared_fft_pipeline,
+        &bitrev_pipeline,
+        &command_queue,
+        &data_buf,
+        &fwd_twiddle_buf,
+        &fwd_twiddle_buf,
+        &modulus_buf,
+        &nprime_buf,
+        fft_n,
+        batch_size,
+    );
+
+    // --- Read back evaluated data ---
     let ptr = data_buf.contents() as *const FieldElem;
     let raw = unsafe { std::slice::from_raw_parts(ptr, batch_size * fft_n) };
-    let ninv =
-        BigUint::from(fft_n as u64).modpow(&(modulus.deref() - BigUint::from(2u32)), &modulus);
 
-    let mut column_polys: Vec<Polynomial> = Vec::new();
+    let mut extended_data_square = DataSquare::new(vec![], 0, 0);
     for col_idx in 0..batch_size {
-        let mut coeffs = Vec::with_capacity(fft_n);
         for j in 0..fft_n {
             let fe = &raw[col_idx * fft_n + j];
             let limbs = [fe.x, fe.y, fe.z, fe.w];
             let f_mont = limbs_to_f(&limbs, modulus.clone());
-            let mut val = from_montgomery(&f_mont.value, &modulus, nprime);
-            val = (&val * &ninv) % &*modulus;
-            coeffs.push(F {
-                value: val,
-                modulus: modulus.clone(),
-            });
-        }
-        column_polys.push(Polynomial::from_coeffs(coeffs));
-    }
-
-    // ----------------------------
-    // 5. Evaluate columns on extended domain
-    // ----------------------------
-    let mut extended_data_square = DataSquare::new(vec![], 0, 0);
-    for (col_idx, column_poly) in column_polys.into_iter().enumerate() {
-        for i in 0..extended_domain.len() {
-            let x = &extended_domain[i];
-            let y = column_poly.evaluate(&x);
-            extended_data_square.set_cell(col_idx, i, y);
+            let val = from_montgomery(&f_mont.value, &modulus, nprime);
+            extended_data_square.set_cell(
+                col_idx,
+                j,
+                F {
+                    value: val,
+                    modulus: modulus.clone(),
+                },
+            );
         }
     }
 
@@ -438,14 +451,12 @@ fn run_zoda_test_gpu(data_size: usize) -> std::time::Duration {
     }
 
     // ----------------------------
-    // 8. Interpolate y (CPU or GPU)
+    // 8. Interpolate y (CPU IFFT + FFT)
     // ----------------------------
     let y_poly = Polynomial::interpolate(&domain, &y);
-    let mut y_encoded: Vec<F> = Vec::new();
-    for x in extended_domain {
-        let y_val = y_poly.evaluate(&x);
-        y_encoded.push(y_val);
-    }
+    let mut evals = y_poly.coeffs.clone();
+    // (optional: could offload to GPU FFT here too)
+    crate::ntt::fft(&mut evals, &F::from_biguint(omega.clone(), modulus.clone()));
 
     // ----------------------------
     // 9. Verify correctness
@@ -458,7 +469,7 @@ fn run_zoda_test_gpu(data_size: usize) -> std::time::Duration {
             .zip(deterministic_coefficients.iter())
             .map(|(x, y)| x * y)
             .fold(F::zero(modulus.clone()), |acc, x| acc + x);
-        assert_eq!(running_sum, y_encoded[random_row]);
+        assert_eq!(running_sum, evals[random_row]);
     }
 
     start_time.elapsed()
