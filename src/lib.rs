@@ -93,8 +93,10 @@ impl DataSquare {
 }
 
 fn run_zoda_test_cpu(data_size: usize) -> std::time::Duration {
+    use crate::ntt::{ifft, roots_of_unity_domain};
     let start_time = Instant::now();
-    // some NTT friendly modulus
+
+    // BN254 modulus
     let modulus = Arc::new(
         BigUint::parse_bytes(
             b"21888242871839275222246405745257275088548364400416034343698204186575808495617",
@@ -102,9 +104,9 @@ fn run_zoda_test_cpu(data_size: usize) -> std::time::Duration {
         )
         .unwrap(),
     );
-    let mut data_square = DataSquare::new(vec![], 0, 0);
 
-    // Create larger data square with random data
+    // Build data square
+    let mut data_square = DataSquare::new(vec![], 0, 0);
     for col in 0..data_size {
         for row in 0..data_size {
             let value = rand::rng().random_range(1..256);
@@ -112,69 +114,73 @@ fn run_zoda_test_cpu(data_size: usize) -> std::time::Duration {
         }
     }
 
-    let domain: Vec<F> = (0..data_square.rows)
-        .map(|i| F::new(i as u64, modulus.clone()))
+    // NTT domain (power-of-two), primitive root ω = domain[1]
+    let fft_n = data_square.rows.next_power_of_two();
+    let domain = roots_of_unity_domain(fft_n, modulus.clone());
+    let omega = domain[1].clone();
+
+    // We'll also use a roots-of-unity "extended" domain (same ω) for parity/evals,
+    // mirroring your GPU code: just take the first columns*5 powers.
+    let extended_domain: Vec<F> = (0..(data_square.columns * 5))
+        .map(|i| {
+            let mut x = F::new(1, modulus.clone());
+            // fast pow by repeated multiply (avoids BigUint pow in tight loop)
+            for _ in 0..i {
+                x = &x * &omega;
+            }
+            x
+        })
         .collect();
 
-    // 1:4 parity data
-    let extended_domain: Vec<F> = (0..data_square.columns * 5)
-        .map(|i| F::new(i as u64, modulus.clone()))
-        .collect();
-
+    // ----- Interpolate each column via IFFT (values -> coeffs) -----
     let mut column_polys = Vec::new();
     for column_idx in 0..data_square.columns {
-        let column = data_square.get_column(column_idx);
-        // interpolate each column into a polynomial
-        let column_poly = Polynomial::interpolate(&domain, &column);
-        column_polys.push(column_poly);
+        // column values are evaluations at [1, ω, ω^2, ...]; pad to fft_n
+        let mut evals = data_square.get_column(column_idx);
+        evals.resize(fft_n, F::zero(modulus.clone()));
+
+        // IFFT over ω gives coefficients (scaled correctly; ifft() divides by n)
+        let mut coeffs = evals;
+        ifft(&mut coeffs, &omega);
+
+        // Wrap as Polynomial so your downstream evaluate() stays unchanged
+        column_polys.push(Polynomial::from_coeffs(coeffs));
     }
 
-    // evaluate the column polynomials over the extended domain and create new cells
+    // ----- Evaluate the column polys over the (roots-based) extended domain -----
     let mut extended_data_square = DataSquare::new(vec![], 0, 0);
     for (col_idx, column_poly) in column_polys.into_iter().enumerate() {
         for i in 0..extended_domain.len() {
             let x = &extended_domain[i];
             let y = column_poly.evaluate(&x);
-            extended_data_square.set_cell(col_idx, i, y); // (column, row)
+            extended_data_square.set_cell(col_idx, i, y);
         }
     }
 
     let encoded_data_square_root = extended_data_square.hash_root();
 
-    // compute running sum row-wise for the encoded data (original + parity), using random
-    // linear combinations
-    let mut y: Vec<F> = Vec::new();
-
-    // compute y using the original data in the extended data square,
-    // computing running sum of random linear combinations
-    // column-wise
-    // generate deterministic coefficients using encoded_data_square_root (fiat shamir)
+    // ----- Fiat–Shamir coefficients (unchanged) -----
     let mut deterministic_coefficients: Vec<F> = (0..extended_data_square.rows)
         .map(|i| {
-            // hash root + index with SHA256
             let mut hasher = Sha256::new();
             hasher.update(encoded_data_square_root.as_bytes());
             hasher.update(&i.to_le_bytes());
             let digest = hasher.finalize();
-            // interpret the whole 256-bit digest as a BigUint
             let big = BigUint::from_bytes_be(&digest);
-            // fold it into u64 for your F::new constructor
-            // (still deterministic, but using all digest bits)
             let val = (big % u64::MAX).to_u64().unwrap();
             F::new(val, modulus.clone())
         })
         .collect();
 
-    // deterministically derive random coefficients from the root
     for i in 0..deterministic_coefficients.len() {
         deterministic_coefficients[i] =
             deterministic_coefficients[i].clone() + F::new(i as u64, modulus.clone());
     }
 
+    // ----- Row-wise running sums -----
+    let mut y: Vec<F> = Vec::new();
     for row_idx in 0..data_square.rows {
         let row_data = extended_data_square.get_row(row_idx);
-
-        // compute running sum of random coefficients * row data
         let running_sum = row_data
             .iter()
             .zip(deterministic_coefficients.iter())
@@ -183,15 +189,20 @@ fn run_zoda_test_cpu(data_size: usize) -> std::time::Duration {
         y.push(running_sum);
     }
 
-    // now interpolate y the same way as the columns over the original domain (because we only used rows in range 0..data_square.rows)
-    let y_poly = Polynomial::interpolate(&domain, &y);
-    let mut y_encoded: Vec<F> = Vec::new();
+    // Interpolate y over the same roots-of-unity domain using IFFT as well
+    let mut y_coeffs = y.clone();
+    y_coeffs.resize(fft_n, F::zero(modulus.clone()));
+    ifft(&mut y_coeffs, &omega);
+    let y_poly = Polynomial::from_coeffs(y_coeffs);
+
+    // Evaluate y over the extended domain
+    let mut y_encoded: Vec<F> = Vec::with_capacity(extended_domain.len());
     for x in extended_domain {
         let y_val = y_poly.evaluate(&x);
         y_encoded.push(y_val);
     }
 
-    // 64 queries
+    // ----- Queries / checks (unchanged) -----
     for _ in 0..64 {
         let random_row = rand::rng().random_range(0..extended_data_square.rows);
         let row_data = extended_data_square.get_row(random_row);
@@ -203,6 +214,7 @@ fn run_zoda_test_cpu(data_size: usize) -> std::time::Duration {
 
         assert_eq!(running_sum, y_encoded[random_row]);
     }
+
     start_time.elapsed()
 }
 

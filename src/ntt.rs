@@ -88,12 +88,9 @@ pub fn roots_of_unity_domain(n: usize, modulus: Arc<BigUint>) -> Vec<F> {
         }
         true
     }
-
-    let mut g_int = BigUint::from(2u32);
-    while !is_generator(&g_int, p) {
-        g_int += 1u32;
-    }
-    let g = F::new(g_int.to_u64_digits()[0], modulus.clone());
+    // BN254's field generator (used in zk-SNARKs, etc.)
+    let g_int = BigUint::from(5u32); // known good primitive root for BN254
+    let g = F::from_biguint(g_int, modulus.clone());
 
     // compute ω = g^((p-1)/n), the primitive n-th root of unity
     let exp = (p - 1u32) / BigUint::from(n as u32);
