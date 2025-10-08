@@ -17,7 +17,7 @@ use num_bigint::BigUint;
 use rand::Rng;
 use std::{cmp::max, sync::Arc, time::Instant};
 
-use crate::{ff::F, metal::metal_long::find_root_of_unity, polynomial::Polynomial};
+use crate::{ff::F, metal::metal_long::find_root_of_unity, ntt::fft, polynomial::Polynomial};
 pub mod ff;
 pub mod polynomial;
 mod types;
@@ -150,9 +150,9 @@ fn run_zoda_test_cpu(data_size: usize) -> std::time::Duration {
     // ----- Evaluate the column polys over the (roots-based) extended domain -----
     let mut extended_data_square = DataSquare::new(vec![], 0, 0);
     for (col_idx, column_poly) in column_polys.into_iter().enumerate() {
-        for i in 0..extended_domain.len() {
-            let x = &extended_domain[i];
-            let y = column_poly.evaluate(&x);
+        let mut evals = column_poly.coeffs.clone();
+        fft(&mut evals, &omega);
+        for (i, y) in evals.into_iter().enumerate() {
             extended_data_square.set_cell(col_idx, i, y);
         }
     }
@@ -197,9 +197,10 @@ fn run_zoda_test_cpu(data_size: usize) -> std::time::Duration {
 
     // Evaluate y over the extended domain
     let mut y_encoded: Vec<F> = Vec::with_capacity(extended_domain.len());
-    for x in extended_domain {
-        let y_val = y_poly.evaluate(&x);
-        y_encoded.push(y_val);
+    let mut evals = y_poly.coeffs.clone();
+    fft(&mut evals, &omega);
+    for (i, y) in evals.into_iter().enumerate() {
+        y_encoded.push(y);
     }
 
     // ----- Queries / checks (unchanged) -----
@@ -216,12 +217,6 @@ fn run_zoda_test_cpu(data_size: usize) -> std::time::Duration {
     }
 
     start_time.elapsed()
-}
-
-#[test]
-fn test_zoda_impl() {
-    let duration = run_zoda_test_cpu(4);
-    println!("[CPU 4x4]: {:?}", duration);
 }
 
 fn run_zoda_test_gpu(data_size: usize) -> std::time::Duration {
