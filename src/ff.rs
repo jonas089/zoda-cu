@@ -20,6 +20,12 @@ impl F {
             modulus,
         }
     }
+    pub fn from_biguint(value: BigUint, modulus: Arc<BigUint>) -> Self {
+        Self {
+            value: value % &*modulus,
+            modulus,
+        }
+    }
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = self.value.to_bytes_be();
         bytes.append(&mut self.modulus.to_bytes_be());
