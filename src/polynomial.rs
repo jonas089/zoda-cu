@@ -5,7 +5,6 @@ use std::{
 
 use num_bigint::BigUint;
 
-// This file contains an implementation of a Polynomial defined over our Finite Field Elements
 use crate::ff::F;
 pub struct Polynomial {
     pub coeffs: Vec<F>,

@@ -13,7 +13,7 @@ fn bit_reverse(mut x: usize, log_n: usize) -> usize {
     result
 }
 
-pub fn fft(values: &mut [F], root: &F) {
+pub fn ntt(values: &mut [F], root: &F) {
     let n = values.len();
     let log_n = n.trailing_zeros() as usize;
     // bit reversal
@@ -42,10 +42,10 @@ pub fn fft(values: &mut [F], root: &F) {
     }
 }
 
-pub fn ifft(values: &mut [F], root: &F) {
+pub fn intt(values: &mut [F], root: &F) {
     let n = values.len();
     let inv_root = root.clone().pow((n as u32) - 1); // root^-1
-    fft(values, &inv_root);
+    ntt(values, &inv_root);
     let inv_n = F::new(1, values[0].modulus.clone()) / F::new(n as u64, values[0].modulus.clone());
     for v in values.iter_mut() {
         *v = v.clone() * inv_n.clone();
@@ -56,7 +56,7 @@ pub fn ifft(values: &mut [F], root: &F) {
 /// Requires that `n` divides (modulus - 1).
 pub fn roots_of_unity_domain(n: usize, modulus: Arc<BigUint>) -> Vec<F> {
     use num_bigint::BigUint;
-    assert!(n.is_power_of_two(), "FFT needs power-of-two size");
+    assert!(n.is_power_of_two(), "ntt needs power-of-two size");
     let p = modulus.as_ref();
 
     // Find a primitive root g (generator of F_p^*).
@@ -111,7 +111,7 @@ pub fn roots_of_unity_domain(n: usize, modulus: Arc<BigUint>) -> Vec<F> {
 }
 
 #[test]
-fn test_fft_interpolation() {
+fn test_ntt_interpolation() {
     use num_bigint::BigUint;
     use std::sync::Arc;
 
@@ -126,25 +126,17 @@ fn test_fft_interpolation() {
         F::new(5, modulus.clone()),
     ];
 
-    // === Interpolate by going coeffs -> evals -> coeffs ===
-    // pad coeffs to length n
     let mut evals = coeffs.clone();
     evals.resize(n, F::zero(modulus.clone()));
 
     // primitive n-th root of unity is the domain[1]
     let omega = domain[1].clone();
 
-    // FFT to evaluations
-    fft(&mut evals, &omega);
-
-    // Inverse FFT back to coefficients
+    ntt(&mut evals, &omega);
     let mut recovered = evals.clone();
-    ifft(&mut recovered, &omega);
+    intt(&mut recovered, &omega);
 
-    // Shrink recovered to original degree
     let recovered_trimmed: Vec<F> = recovered.into_iter().take(coeffs.len()).collect();
-
-    // Check coefficients match
     for (a, b) in coeffs.iter().zip(recovered_trimmed.iter()) {
         assert!(a.equals(b), "coeff mismatch: {:?} vs {:?}", a, b);
     }
