@@ -7,8 +7,8 @@
 // BabyBear field element
 typedef uint64_t BabyBearElem;
 
-// Device functions for BabyBear field arithmetic
-__device__ __forceinline__ uint64_t bb_reduce(uint64_t val) {
+// Device and host functions for BabyBear field arithmetic
+__device__ __host__ __forceinline__ uint64_t bb_reduce(uint64_t val) {
     if (val >= BABYBEAR_PRIME) {
         val -= BABYBEAR_PRIME;
     }
@@ -18,12 +18,12 @@ __device__ __forceinline__ uint64_t bb_reduce(uint64_t val) {
     return val;
 }
 
-__device__ __forceinline__ uint64_t bb_add(uint64_t a, uint64_t b) {
+__device__ __host__ __forceinline__ uint64_t bb_add(uint64_t a, uint64_t b) {
     uint64_t sum = a + b;
     return bb_reduce(sum);
 }
 
-__device__ __forceinline__ uint64_t bb_sub(uint64_t a, uint64_t b) {
+__device__ __host__ __forceinline__ uint64_t bb_sub(uint64_t a, uint64_t b) {
     if (a >= b) {
         return a - b;
     } else {
@@ -31,22 +31,25 @@ __device__ __forceinline__ uint64_t bb_sub(uint64_t a, uint64_t b) {
     }
 }
 
-__device__ __forceinline__ uint64_t bb_mul(uint64_t a, uint64_t b) {
+__device__ __host__ __forceinline__ uint64_t bb_mul(uint64_t a, uint64_t b) {
     // Use 128-bit intermediate to avoid overflow
+#ifdef __CUDA_ARCH__
+    // Device code: use CUDA intrinsic
     unsigned long long product_hi, product_lo;
     product_lo = a * b;
     product_hi = __umul64hi(a, b);
-
-    // Fast reduction for BabyBear prime
-    // Since BABYBEAR_PRIME = 2^31 - 2^27 + 1
-    // We can use Barrett reduction or direct modulo
-    // For now, use direct modulo (compiler will optimize)
     uint64_t result = product_lo % BABYBEAR_PRIME;
     return result;
+#else
+    // Host code: use standard C++
+    __uint128_t product = (__uint128_t)a * (__uint128_t)b;
+    uint64_t result = product % BABYBEAR_PRIME;
+    return result;
+#endif
 }
 
-// Modular exponentiation on device
-__device__ uint64_t bb_pow(uint64_t base, uint64_t exp) {
+// Modular exponentiation on device and host
+__device__ __host__ uint64_t bb_pow(uint64_t base, uint64_t exp) {
     uint64_t result = 1;
     while (exp > 0) {
         if (exp & 1) {
