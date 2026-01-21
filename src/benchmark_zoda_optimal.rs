@@ -32,10 +32,14 @@ extern "C" {
     fn cuda_intt(d_values: *mut u64, n: u32, omega: u64);
 }
 
-fn benchmark_cpu(config: &BenchmarkConfig) -> u128 {
+fn benchmark_cpu(config: &BenchmarkConfig) -> Option<u128> {
     let data_size_bytes = config.data_size_kb * 1024;
     let chunk_size = data_size_bytes / config.k;
     let ntt_size = config.n.next_power_of_two();
+
+    if chunk_size > ntt_size {
+        return None; // Invalid config: chunk_size exceeds ntt_size
+    }
 
     // Generate all data
     let total_elements = config.k * ntt_size;
@@ -67,7 +71,7 @@ fn benchmark_cpu(config: &BenchmarkConfig) -> u128 {
         all_data[chunk_start..chunk_end].copy_from_slice(&chunk);
     }
 
-    start.elapsed().as_micros()
+    Some(start.elapsed().as_micros())
 }
 
 #[cfg(feature = "cuda")]
@@ -75,6 +79,10 @@ fn benchmark_gpu_optimal(config: &BenchmarkConfig) -> Result<u128, String> {
     let data_size_bytes = config.data_size_kb * 1024;
     let chunk_size = data_size_bytes / config.k;
     let ntt_size = config.n.next_power_of_two();
+
+    if chunk_size > ntt_size {
+        return Err(format!("Invalid config: chunk_size ({}) > ntt_size ({})", chunk_size, ntt_size));
+    }
 
     // Generate all data in one contiguous array
     let total_elements = config.k * ntt_size;
@@ -144,7 +152,15 @@ fn run_benchmark_config(config: BenchmarkConfig) -> Option<BenchmarkResult> {
         // CPU benchmark
         print!("    CPU... ");
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
-        let cpu_time_us = benchmark_cpu(&config);
+        let cpu_time_us = match benchmark_cpu(&config) {
+            Some(t) => t,
+            None => {
+                let chunk_size = data_size_bytes / config.k;
+                let ntt_size = config.n.next_power_of_two();
+                println!("SKIPPED (chunk_size {} > ntt_size {})", chunk_size, ntt_size);
+                return None;
+            }
+        };
         println!("{}µs", cpu_time_us);
 
         // GPU benchmark
