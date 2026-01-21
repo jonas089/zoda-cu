@@ -19,6 +19,9 @@ mod benchmark_zoda_batched;
 #[cfg(test)]
 mod benchmark_zoda_optimal;
 
+#[cfg(test)]
+mod benchmark_zoda_mobile;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FieldElem {
