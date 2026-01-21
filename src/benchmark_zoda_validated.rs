@@ -145,16 +145,18 @@ fn generate_deterministic_coefficients(
         .collect()
 }
 
-/// Verify ZODA encoding correctness via column-wise Reed-Solomon check
+/// Verify GPU encoding correctness by comparing with CPU reference implementation
 ///
 /// The encoding works column-wise:
 /// - Each column is INTT'd to get polynomial coefficients
+/// - Padded with zeros from k to k+n
 /// - Then NTT'd to extend from k to k+n evaluation points
-/// So we verify that each column forms a valid Reed-Solomon codeword by:
-/// 1. Taking the first k values of a column
-/// 2. INTT to get polynomial coefficients
-/// 3. NTT to extend to k+n points
-/// 4. Verify the extended points match the encoded column
+///
+/// Verification approach:
+/// 1. Recreate the original input data for each column
+/// 2. Run the same INTT → pad → NTT operations on CPU
+/// 3. Compare CPU result with GPU result
+/// 4. If they match, GPU encoding is correct
 #[cfg(feature = "cuda")]
 fn validate_zoda_encoding(
     config: &EncodingConfig,
@@ -185,26 +187,32 @@ fn validate_zoda_encoding(
             column.push(encoded_rows[row_idx][col_idx]);
         }
 
-        // Take first k values (original data)
-        let mut original_k: Vec<BabyBear> = column.iter().take(k).copied().collect();
-        original_k.resize(ntt_size_k, BabyBear::zero());
+        // Recreate the ORIGINAL input for this column (before encoding)
+        // The original input generation: value = ((row_idx * num_positions + col) % 2013265921)
+        let mut original_input: Vec<BabyBear> = Vec::with_capacity(k);
+        for row_idx in 0..k {
+            let value = ((row_idx * num_positions + col_idx) % 2013265921) as u64;
+            original_input.push(BabyBear::new(value));
+        }
 
-        // INTT to get polynomial coefficients
-        cpu_intt(&mut original_k, omega_k);
+        // Pad to ntt_size_k
+        original_input.resize(ntt_size_k, BabyBear::zero());
+
+        // INTT to get polynomial coefficients (same as GPU does)
+        cpu_intt(&mut original_input, omega_k);
 
         // Extend to k+n by padding with zeros
-        original_k.resize(ntt_size_kn, BabyBear::zero());
+        original_input.resize(ntt_size_kn, BabyBear::zero());
 
-        // NTT to evaluate at k+n points
-        let mut extended = original_k.clone();
-        cpu_ntt(&mut extended, omega_kn);
+        // NTT to evaluate at k+n points (same as GPU does)
+        cpu_ntt(&mut original_input, omega_kn);
 
-        // Verify that the extended values match the encoded column
+        // Verify that the CPU-recomputed values match the GPU-encoded column
         for row_idx in 0..(k + n) {
-            if extended[row_idx].value != column[row_idx].value {
+            if original_input[row_idx].value != column[row_idx].value {
                 println!(
-                    "  ✗ Validation FAILED at column {} row {}: expected {}, got {}",
-                    col_idx, row_idx, column[row_idx].value, extended[row_idx].value
+                    "  ✗ Validation FAILED at column {} row {}: GPU={}, CPU={}",
+                    col_idx, row_idx, column[row_idx].value, original_input[row_idx].value
                 );
                 all_checks_passed = false;
                 break;
