@@ -1,6 +1,6 @@
 #![allow(unused)]
-mod ntt;
 pub mod babybear;
+mod ntt;
 pub mod ntt_babybear;
 pub mod zoda_babybear;
 
@@ -14,16 +14,7 @@ mod benchmark;
 mod benchmark_zoda;
 
 #[cfg(test)]
-mod benchmark_zoda_batched;
-
-#[cfg(test)]
 mod benchmark_zoda_optimal;
-
-#[cfg(test)]
-mod benchmark_zoda_mobile;
-
-#[cfg(test)]
-mod benchmark_zoda_fixed;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -248,9 +239,6 @@ fn test_zoda_impl_cpu() {
 fn test_compare_implementations() {
     use crate::zoda_babybear::run_zoda_test_babybear;
 
-    println!("\n=== ZODA Performance Comparison ===\n");
-
-    // Test sizes
     let sizes = vec![4, 8, 16, 32];
 
     for size in sizes {
@@ -275,8 +263,10 @@ fn test_compare_implementations() {
                 let duration_bb_gpu = run_zoda_test_babybear(size, true);
                 println!("  BabyBear GPU:   {:?}", duration_bb_gpu);
 
-                let gpu_speedup_vs_bigint = duration_bigint.as_secs_f64() / duration_bb_gpu.as_secs_f64();
-                let gpu_speedup_vs_cpu = duration_bb_cpu.as_secs_f64() / duration_bb_gpu.as_secs_f64();
+                let gpu_speedup_vs_bigint =
+                    duration_bigint.as_secs_f64() / duration_bb_gpu.as_secs_f64();
+                let gpu_speedup_vs_cpu =
+                    duration_bb_cpu.as_secs_f64() / duration_bb_gpu.as_secs_f64();
                 println!("  GPU Speedup vs BigInt: {:.2}x", gpu_speedup_vs_bigint);
                 println!("  GPU Speedup vs CPU:    {:.2}x", gpu_speedup_vs_cpu);
             } else {

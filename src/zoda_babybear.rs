@@ -107,7 +107,6 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
         println!("Warning: GPU requested but not available, falling back to CPU");
     }
 
-    // Build data square
     let mut data_square = BabyBearDataSquare::new(vec![], 0, 0);
     for col in 0..data_size {
         for row in 0..data_size {
@@ -120,7 +119,6 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
     let ntt_n = data_square.rows.next_power_of_two();
     let omega = BabyBear::get_root_of_unity(ntt_n.trailing_zeros());
 
-    // Column polynomials
     let mut column_polys = Vec::new();
     for column_idx in 0..data_square.columns {
         let mut evals = data_square.get_column(column_idx);
@@ -138,7 +136,6 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
         column_polys.push(BabyBearPolynomial::from_coeffs(coeffs));
     }
 
-    // Encode columns by evaluating at extended domain
     let mut extended_data_square = BabyBearDataSquare::new(vec![], 0, 0);
     for (col_idx, column_poly) in column_polys.into_iter().enumerate() {
         let mut evals = column_poly.coeffs.clone();
@@ -166,19 +163,17 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
             hasher.update(&i.to_le_bytes());
             let digest = hasher.finalize();
             let val = u64::from_be_bytes([
-                digest[0], digest[1], digest[2], digest[3],
-                digest[4], digest[5], digest[6], digest[7],
+                digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
+                digest[7],
             ]);
             BabyBear::new(val)
         })
         .collect();
 
     for i in 0..deterministic_coefficients.len() {
-        deterministic_coefficients[i] =
-            deterministic_coefficients[i] + BabyBear::new(i as u64);
+        deterministic_coefficients[i] = deterministic_coefficients[i] + BabyBear::new(i as u64);
     }
 
-    // Compute row linear combinations
     let mut y: Vec<BabyBear> = Vec::new();
     for row_idx in 0..data_square.rows {
         let row_data = extended_data_square.get_row(row_idx);
@@ -189,7 +184,6 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
         y.push(running_sum);
     }
 
-    // Interpolate y
     let mut y_coeffs = y.clone();
     y_coeffs.resize(ntt_n, BabyBear::zero());
     if gpu_available {
@@ -208,7 +202,6 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
         ntt(&mut y_encoded, omega);
     }
 
-    // Simulate sampling
     for _ in 0..64 {
         let random_row = rand::rng().random_range(0..extended_data_square.rows);
         let row_data = extended_data_square.get_row(random_row);

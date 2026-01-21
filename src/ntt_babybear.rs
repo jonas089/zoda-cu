@@ -19,7 +19,6 @@ pub fn ntt(values: &mut [BabyBear], omega: BabyBear) {
     assert!(n.is_power_of_two(), "NTT size must be power of 2");
     let log_n = n.trailing_zeros() as usize;
 
-    // Bit-reversal permutation
     for i in 0..n {
         let j = bit_reverse(i, log_n);
         if i < j {
@@ -27,7 +26,6 @@ pub fn ntt(values: &mut [BabyBear], omega: BabyBear) {
         }
     }
 
-    // Cooley-Tukey butterfly iterations
     let mut len = 2;
     while len <= n {
         let step = n / len;
@@ -88,19 +86,14 @@ mod tests {
         let omega = BabyBear::get_root_of_unity(n.trailing_zeros());
 
         // Create test data
-        let mut values: Vec<BabyBear> = (0..n)
-            .map(|i| BabyBear::new((i * 7 + 3) as u64))
-            .collect();
+        let mut values: Vec<BabyBear> = (0..n).map(|i| BabyBear::new((i * 7 + 3) as u64)).collect();
 
         let original = values.clone();
 
-        // Forward NTT
         ntt(&mut values, omega);
 
-        // Inverse NTT
         intt(&mut values, omega);
 
-        // Should recover original values
         for (a, b) in original.iter().zip(values.iter()) {
             assert_eq!(a.value, b.value, "NTT roundtrip failed");
         }
@@ -113,7 +106,6 @@ mod tests {
         let omega = BabyBear::get_root_of_unity(n.trailing_zeros());
         let domain = roots_of_unity_domain(n);
 
-        // Polynomial: 1 + 2x + 3x^2
         let mut coeffs = vec![BabyBear::zero(); n];
         coeffs[0] = BabyBear::new(1);
         coeffs[1] = BabyBear::new(2);
@@ -123,10 +115,8 @@ mod tests {
         let mut evals = coeffs.clone();
         ntt(&mut evals, omega);
 
-        // Verify first evaluation: f(1) = 1 + 2 + 3 = 6
         assert_eq!(evals[0].value, 6);
 
-        // Verify evaluation at omega
         let x = domain[1];
         let expected = coeffs[0] + coeffs[1] * x + coeffs[2] * x * x;
         assert_eq!(evals[1].value, expected.value);
@@ -137,21 +127,16 @@ mod tests {
         let n = 16usize;
         let domain = roots_of_unity_domain(n);
 
-        // First element should be 1
         assert_eq!(domain[0].value, 1);
 
-        // omega^n should equal 1
         let omega = domain[1];
         let result = omega.pow(n as u64);
         assert_eq!(result.value, 1);
 
-        // All elements should be distinct (except the first and last which should both be 1 for a full cycle)
-        // Actually, for n elements, we should have n distinct values
         for i in 0..n {
-            for j in i+1..n {
+            for j in i + 1..n {
                 assert_ne!(
-                    domain[i].value,
-                    domain[j].value,
+                    domain[i].value, domain[j].value,
                     "domain[{}] = {} equals domain[{}] = {}",
                     i, domain[i].value, j, domain[j].value
                 );

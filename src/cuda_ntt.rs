@@ -40,9 +40,9 @@ extern "C" {
     // Fully optimized RS encoding: INTT + pad + NTT all on GPU
     // Zero CPU roundtrips - single upload, single download
     pub fn cuda_rs_encode_vertical(
-        d_input: *const u64,      // Input buffer on GPU
-        d_output: *mut u64,       // Output buffer on GPU
-        d_intt_work: *mut u64,    // Work buffer on GPU
+        d_input: *const u64,
+        d_output: *mut u64,
+        d_intt_work: *mut u64,
         num_positions: u32,
         ntt_size_k: u32,
         ntt_size_kn: u32,
@@ -74,10 +74,7 @@ impl CudaBuffer {
             let err = cuda_malloc(&mut ptr, size);
             if err != CUDA_SUCCESS {
                 let err_str = CStr::from_ptr(cuda_get_error_string(err));
-                return Err(format!(
-                    "CUDA malloc failed: {}",
-                    err_str.to_string_lossy()
-                ));
+                return Err(format!("CUDA malloc failed: {}", err_str.to_string_lossy()));
             }
         }
         Ok(Self { ptr, size })
@@ -223,9 +220,8 @@ mod tests {
         }
 
         let n = 256usize;
-        let mut cpu_values: Vec<BabyBear> = (0..n)
-            .map(|i| BabyBear::new((i * 7 + 3) as u64))
-            .collect();
+        let mut cpu_values: Vec<BabyBear> =
+            (0..n).map(|i| BabyBear::new((i * 7 + 3) as u64)).collect();
         let mut gpu_values = cpu_values.clone();
 
         let omega = BabyBear::get_root_of_unity(n.trailing_zeros());
@@ -254,9 +250,7 @@ mod tests {
         }
 
         let n = 256usize;
-        let original: Vec<BabyBear> = (0..n)
-            .map(|i| BabyBear::new((i * 7 + 3) as u64))
-            .collect();
+        let original: Vec<BabyBear> = (0..n).map(|i| BabyBear::new((i * 7 + 3) as u64)).collect();
         let mut values = original.clone();
 
         // Forward + inverse NTT

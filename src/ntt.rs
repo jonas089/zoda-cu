@@ -88,6 +88,7 @@ pub fn roots_of_unity_domain(n: usize, modulus: Arc<BigUint>) -> Vec<F> {
         }
         true
     }
+
     // BN254's field generator (used in zk-SNARKs, etc.)
     let g_int = BigUint::from(5u32); // known good primitive root for BN254
     let g = F::from_biguint(g_int, modulus.clone());

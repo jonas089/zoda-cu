@@ -51,8 +51,7 @@ fn benchmark_ntt_size(size: usize) -> Option<BenchmarkResult> {
                 let gpu_time = gpu_start.elapsed();
 
                 // Verify results match
-                for (i, (cpu_val, gpu_val)) in
-                    cpu_values.iter().zip(gpu_values.iter()).enumerate()
+                for (i, (cpu_val, gpu_val)) in cpu_values.iter().zip(gpu_values.iter()).enumerate()
                 {
                     if cpu_val.value != gpu_val.value {
                         println!(
@@ -119,7 +118,7 @@ fn benchmark_gpu_vs_cpu() {
 
     #[cfg(not(feature = "cuda"))]
     {
-        println!("❌ CUDA support not compiled in.");
+        println!("   CUDA support not compiled in.");
         println!("   Build with: cargo build --release");
         println!("   Make sure nvcc is in your PATH.");
         return;
@@ -128,14 +127,14 @@ fn benchmark_gpu_vs_cpu() {
     #[cfg(feature = "cuda")]
     {
         if !cuda_available() {
-            println!("❌ CUDA not available on this system.");
+            println!("   CUDA not available on this system.");
             println!("   - Check nvidia-smi shows your GPU");
             println!("   - Verify CUDA drivers are installed");
             println!("   - Try: export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH");
             return;
         }
 
-        println!("✅ CUDA available - GPU detected!\n");
+        println!("   CUDA available - GPU detected!\n");
 
         // Part 1: Raw NTT Performance
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -152,10 +151,7 @@ fn benchmark_gpu_vs_cpu() {
             if let Some(result) = benchmark_ntt_size(size) {
                 println!(
                     "CPU: {:>6}µs | GPU: {:>6}µs | Speedup: {:.2}x {}",
-                    result.cpu_ntt_us,
-                    result.gpu_ntt_us,
-                    result.speedup,
-                    if result.speedup > 1.0 { "🚀" } else { "⚠️ " }
+                    result.cpu_ntt_us, result.gpu_ntt_us, result.speedup,
                 );
                 ntt_results.push(result);
             } else {
@@ -178,21 +174,13 @@ fn benchmark_gpu_vs_cpu() {
             if let Some((cpu_us, gpu_us, speedup)) = benchmark_zoda_size(size) {
                 println!(
                     "CPU: {:>6}µs | GPU: {:>6}µs | Speedup: {:.2}x {}",
-                    cpu_us,
-                    gpu_us,
-                    speedup,
-                    if speedup > 1.0 { "🚀" } else { "⚠️ " }
+                    cpu_us, gpu_us, speedup,
                 );
                 zoda_results.push((size, cpu_us, gpu_us, speedup));
             } else {
                 println!("FAILED");
             }
         }
-
-        // Summary
-        println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("Summary");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
         if !ntt_results.is_empty() {
             let avg_ntt_speedup: f64 =
@@ -225,36 +213,32 @@ fn benchmark_gpu_vs_cpu() {
             );
         }
 
-        println!("\n╔═══════════════════════════════════════════════════════════╗");
-        println!("║  Benchmark Complete! ✅                                   ║");
-        println!("╚═══════════════════════════════════════════════════════════╝\n");
-
         // Interpretation
         println!("📊 Results Interpretation:");
         if !ntt_results.is_empty() {
-            let avg_speedup = ntt_results.iter().map(|r| r.speedup).sum::<f64>()
-                / ntt_results.len() as f64;
+            let avg_speedup =
+                ntt_results.iter().map(|r| r.speedup).sum::<f64>() / ntt_results.len() as f64;
 
             if avg_speedup > 5.0 {
-                println!("   ✅ EXCELLENT: GPU is significantly faster than CPU");
-                println!("      Your GPU is well-utilized for this workload.");
+                println!("   EXCELLENT: GPU is significantly faster than CPU");
+                println!("   Your GPU is well-utilized for this workload.");
             } else if avg_speedup > 2.0 {
-                println!("   ✓  GOOD: GPU provides solid acceleration");
-                println!("      Larger data sizes will show better GPU performance.");
+                println!("   GOOD: GPU provides solid acceleration");
+                println!("   Larger data sizes will show better GPU performance.");
             } else if avg_speedup > 1.0 {
-                println!("   ⚠️  MARGINAL: GPU is slightly faster");
-                println!("      Small sizes have kernel launch overhead.");
-                println!("      Try larger NTT sizes for better GPU utilization.");
+                println!("   MARGINAL: GPU is slightly faster");
+                println!("   Small sizes have kernel launch overhead.");
+                println!("   Try larger NTT sizes for better GPU utilization.");
             } else {
-                println!("   ⚠️  WARNING: CPU is faster than GPU");
-                println!("      This is unexpected. Possible causes:");
-                println!("      - GPU thermal throttling (check temps)");
-                println!("      - GPU memory bandwidth limitations");
-                println!("      - System under heavy load");
+                println!("   WARNING: CPU is faster than GPU");
+                println!("   This is unexpected. Possible causes:");
+                println!("   - GPU thermal throttling (check temps)");
+                println!("   - GPU memory bandwidth limitations");
+                println!("   - System under heavy load");
             }
         }
 
-        println!("\n💡 Tips:");
+        println!("\n Tips:");
         println!("   - GPU advantage increases with larger NTT sizes (1024+)");
         println!("   - For production, batch multiple operations for best GPU utilization");
         println!("   - Check 'nvidia-smi' during benchmark to monitor GPU usage");
