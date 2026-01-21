@@ -36,6 +36,19 @@ extern "C" {
         stride: u32,
         omega: u64,
     );
+
+    // Fully optimized RS encoding: INTT + pad + NTT all on GPU
+    // Zero CPU roundtrips - single upload, single download
+    pub fn cuda_rs_encode_vertical(
+        d_input: *const u64,      // Input buffer on GPU
+        d_output: *mut u64,       // Output buffer on GPU
+        d_intt_work: *mut u64,    // Work buffer on GPU
+        num_positions: u32,
+        ntt_size_k: u32,
+        ntt_size_kn: u32,
+        omega_k: u64,
+        omega_kn: u64,
+    );
 }
 
 /// Check if CUDA is available

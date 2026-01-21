@@ -362,110 +362,87 @@ void cuda_intt_batched(uint64_t* d_values, uint32_t num_ntts, uint32_t ntt_size,
 }
 
 // ============================================================================
-// FUSED RS ENCODING KERNEL - INTT + zero-pad + NTT in one operation
+// GPU PADDING KERNEL - Zero-pad from size k to size n efficiently on GPU
 // ============================================================================
 
-// This kernel takes k-sized data, pads to n-size, ready for NTT
-// Input:  d_input[batch_idx * k + i] for i in [0, k)
-// Output: d_output[batch_idx * n + i] for i in [0, n), with zeros for i >= k
-__global__ void rs_gather_and_pad(
-    const uint64_t* d_input,    // Input: num_positions values, each with k elements
-    uint64_t* d_output,         // Output: num_positions values, each with n elements
-    uint32_t num_positions,
-    uint32_t k,
-    uint32_t n
+// Pads batched data from stride_in to stride_out with zeros
+// Input:  d_input[batch_idx * stride_in + i] for i in [0, stride_in)
+// Output: d_output[batch_idx * stride_out + i] for i in [0, stride_out)
+//         where output[i] = input[i] if i < stride_in, else 0
+__global__ void gpu_pad_batched(
+    const uint64_t* d_input,
+    uint64_t* d_output,
+    uint32_t num_batches,
+    uint32_t stride_in,
+    uint32_t stride_out
 ) {
     uint32_t global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t total_output = num_positions * n;
+    uint32_t total_elements = num_batches * stride_out;
 
-    if (global_idx >= total_output) return;
+    if (global_idx >= total_elements) return;
 
-    uint32_t pos_idx = global_idx / n;
-    uint32_t elem_idx = global_idx % n;
+    uint32_t batch_idx = global_idx / stride_out;
+    uint32_t elem_idx = global_idx % stride_out;
 
-    if (elem_idx < k) {
-        d_output[global_idx] = d_input[pos_idx * k + elem_idx];
+    if (elem_idx < stride_in) {
+        d_output[global_idx] = d_input[batch_idx * stride_in + elem_idx];
     } else {
         d_output[global_idx] = 0;
     }
 }
 
-// Scatter encoded values back to shard layout
-// Input:  d_encoded[pos_idx * n + shard_idx]
-// Output: d_shards[shard_idx * num_positions + pos_idx]
-__global__ void rs_scatter_to_shards(
-    const uint64_t* d_encoded,
-    uint64_t* d_shards,
-    uint32_t num_positions,
-    uint32_t n
-) {
-    uint32_t global_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t total_elements = num_positions * n;
-
-    if (global_idx >= total_elements) return;
-
-    uint32_t pos_idx = global_idx / n;
-    uint32_t shard_idx = global_idx % n;
-
-    d_shards[shard_idx * num_positions + pos_idx] = d_encoded[global_idx];
-}
-
-// Full RS encode on GPU:
-// 1. Gather k values per position
-// 2. INTT (size k)
-// 3. Pad to n
-// 4. NTT (size n)
-// 5. Scatter to n output shards
-void cuda_rs_encode(
-    const uint64_t* d_input_shards,  // k input shards, each with num_positions elements
-    uint64_t* d_output_shards,       // n output shards, each with num_positions elements
-    uint64_t* d_work_buffer,         // Workspace: num_positions * max(k_padded, n) elements
-    uint32_t num_positions,
-    uint32_t k,
-    uint32_t n,
-    uint64_t omega_k,                // Root of unity for size k (or k_padded)
-    uint64_t omega_n                 // Root of unity for size n
+// Optimized ZODA Reed-Solomon Encoding on GPU
+//
+// This performs vertical RS extension:
+// - Input: num_positions columns, each with k values
+// - Output: num_positions columns, each with (k+n) values
+//
+// Algorithm:
+//   For each column position:
+//     1. INTT(k) to get polynomial coefficients
+//     2. Zero-pad to k+n
+//     3. NTT(k+n) to evaluate at k+n points
+//
+// Memory layout:
+//   Input:  [col_0: k values][col_1: k values]...
+//   Output: [col_0: k+n values][col_1: k+n values]...
+//
+// All operations happen on GPU with NO CPU roundtrips for maximum performance
+void cuda_rs_encode_vertical(
+    const uint64_t* d_input,     // Input: num_positions * ntt_size_k elements
+    uint64_t* d_output,          // Output: num_positions * ntt_size_kn elements
+    uint64_t* d_intt_work,       // Work buffer: num_positions * ntt_size_k elements
+    uint32_t num_positions,      // Number of column positions to process in parallel
+    uint32_t ntt_size_k,         // NTT size for k (must be power of 2 >= k)
+    uint32_t ntt_size_kn,        // NTT size for k+n (must be power of 2 >= k+n)
+    uint64_t omega_k,            // Root of unity for ntt_size_k
+    uint64_t omega_kn            // Root of unity for ntt_size_kn
 ) {
     uint32_t threads = 256;
 
-    // Pad k to power of 2
-    uint32_t k_padded = 1;
-    while (k_padded < k) k_padded <<= 1;
+    // Step 1: Copy input to work buffer (in case d_input and d_intt_work are different)
+    cudaMemcpy(d_intt_work, d_input,
+               num_positions * ntt_size_k * sizeof(uint64_t),
+               cudaMemcpyDeviceToDevice);
 
-    // Pad n to power of 2 (should already be, but just in case)
-    uint32_t n_padded = 1;
-    while (n_padded < n) n_padded <<= 1;
+    // Step 2: Batched INTT on ALL column positions in parallel
+    // This processes num_positions independent NTTs of size ntt_size_k simultaneously
+    cuda_intt_batched(d_intt_work, num_positions, ntt_size_k, ntt_size_k, omega_k);
 
-    // Step 1: Gather and pad input to k_padded
-    // Input layout: d_input_shards[shard_idx * num_positions + pos_idx]
-    // Need to transpose to: work[pos_idx * k_padded + shard_idx]
-    uint32_t gather_total = num_positions * k_padded;
-    uint32_t gather_blocks = (gather_total + threads - 1) / threads;
+    // Step 3: Zero-pad from ntt_size_k to ntt_size_kn on GPU
+    // This avoids a costly GPU->CPU->GPU roundtrip
+    uint32_t total_padded = num_positions * ntt_size_kn;
+    uint32_t pad_blocks = (total_padded + threads - 1) / threads;
+    gpu_pad_batched<<<pad_blocks, threads>>>(
+        d_intt_work, d_output,
+        num_positions, ntt_size_k, ntt_size_kn
+    );
 
-    // Custom gather kernel for shard layout
-    // For now, we'll use a simple approach
-    rs_gather_and_pad<<<gather_blocks, threads>>>(d_input_shards, d_work_buffer, num_positions, k, k_padded);
+    // Step 4: Batched NTT on ALL column positions in parallel
+    // This evaluates the polynomial at k+n points for all columns simultaneously
+    cuda_ntt_batched(d_output, num_positions, ntt_size_kn, ntt_size_kn, omega_kn);
 
-    // Step 2: Batched INTT on all positions (size k_padded each)
-    cuda_intt_batched(d_work_buffer, num_positions, k_padded, k_padded, omega_k);
-
-    // Step 3: Pad from k_padded to n_padded and do NTT
-    // We need a second buffer or in-place expansion
-    // For simplicity, if n_padded > k_padded, we need to re-pad
-    if (n_padded > k_padded) {
-        // This requires careful buffer management
-        // For now, assume k and n are chosen such that we can work in place
-        // or use the output buffer
-    }
-
-    // Step 4: Batched NTT (size n_padded each)
-    cuda_ntt_batched(d_work_buffer, num_positions, n_padded, n_padded, omega_n);
-
-    // Step 5: Scatter to output shards
-    uint32_t scatter_total = num_positions * n;
-    uint32_t scatter_blocks = (scatter_total + threads - 1) / threads;
-    rs_scatter_to_shards<<<scatter_blocks, threads>>>(d_work_buffer, d_output_shards, num_positions, n);
-
+    // Single synchronization at the end
     cudaDeviceSynchronize();
 }
 

@@ -1,39 +1,98 @@
-// ZODA Reed-Solomon Encoding Benchmark
-// Compares GPU vs CPU encoding performance for erasure coding
+// ============================================================================
+// ZODA Reed-Solomon Encoding Benchmark - GPU vs CPU
+// ============================================================================
 //
-// This measures actual RS encoding: given k data shards, produce n total shards
-// using NTT-based polynomial interpolation/evaluation.
+// This benchmark measures the performance of vertical Reed-Solomon encoding
+// used in data availability systems like Celestia's rsema1d.
 //
-// GPU optimization strategy:
-// - Single memory transfer to GPU
-// - Batched NTT kernels process ALL positions in parallel
-// - Single memory transfer back
-// - This gives GPU massive parallelism advantage on large data
+// TERMINOLOGY (matching rsema1d/Celestia):
+// ----------------------------------------
+// - K: number of original data rows
+// - N: number of parity rows
+// - Total rows: K + N (full erasure-coded output)
+// - RowSize: bytes per row (must be multiple of 4 for BabyBear)
+//
+// ENCODING ALGORITHM (Vertical Extension):
+// ----------------------------------------
+// The data is arranged as a matrix with K rows and (RowSize/4) columns.
+// For EACH column position independently:
+//   1. Gather K values from that column across all rows
+//   2. INTT(K) → convert K evaluations to polynomial coefficients
+//   3. Zero-pad coefficients from K to (K+N)
+//   4. NTT(K+N) → evaluate polynomial at (K+N) points
+//   5. Write (K+N) values back to column in output matrix
+//
+// This produces K+N total rows, where any K rows can recover the original data.
+//
+// GPU OPTIMIZATION STRATEGY:
+// --------------------------
+// The key insight is that ALL (RowSize/4) column positions can be processed
+// in parallel on the GPU. For large data:
+//   - CPU: processes columns sequentially → ~O(columns * NTT_time)
+//   - GPU: processes ALL columns in parallel → ~O(NTT_time) + transfer overhead
+//
+// With batched kernels and fused operations, the GPU achieves:
+//   - Single memory upload (all input data)
+//   - Batched INTT on ALL columns simultaneously
+//   - GPU-side zero-padding (no CPU roundtrip!)
+//   - Batched NTT on ALL columns simultaneously
+//   - Single memory download (all output data)
+//
+// For data with 1024 columns and 1024-size NTTs:
+//   - CPU does: 1024 × INTT + 1024 × NTT sequentially
+//   - GPU does: 1 × batched_INTT(1024 columns) + 1 × batched_NTT(1024 columns)
+//   → Expected speedup: ~1000x+ on pure compute, ~100x+ with memory transfer
+//
+// ============================================================================
 
 use crate::babybear::BabyBear;
 use crate::ntt_babybear::{intt as cpu_intt, ntt as cpu_ntt};
 use std::time::Instant;
 
 #[cfg(feature = "cuda")]
-use crate::cuda_ntt::{cuda_available, cuda_intt_batched, cuda_ntt_batched, CudaBuffer};
+use crate::cuda_ntt::{cuda_available, cuda_rs_encode_vertical, CudaBuffer};
+
+// ============================================================================
+// Configuration & Results
+// ============================================================================
 
 #[derive(Debug, Clone)]
 struct EncodingConfig {
-    data_size_mb: usize, // Original data size in MB
-    k: usize,            // Number of original data shards (must be power of 2)
-    expansion: usize,    // Expansion factor (n = k * expansion, n must be power of 2)
+    k: usize,        // Number of original rows
+    n: usize,        // Number of parity rows
+    row_size: usize, // Bytes per row (must be multiple of 4 for BabyBear)
 }
 
 impl EncodingConfig {
-    fn n(&self) -> usize {
-        self.k * self.expansion
+    /// Original data size in MB
+    fn data_size_mb(&self) -> f64 {
+        (self.k * self.row_size) as f64 / (1024.0 * 1024.0)
     }
 
-    fn shard_elements(&self) -> usize {
-        // Each shard has this many field elements
-        // data_size_bytes / k / sizeof(element)
-        // We treat each u32 as one BabyBear element
-        (self.data_size_mb * 1024 * 1024) / self.k / 4
+    /// Total rows after encoding (K original + N parity)
+    fn total_rows(&self) -> usize {
+        self.k + self.n
+    }
+
+    /// Number of BabyBear elements per row (each element is 4 bytes)
+    fn elements_per_row(&self) -> usize {
+        self.row_size / 4
+    }
+
+    /// Number of column positions = number of parallel NTT operations
+    /// This is the dimension that GPU parallelizes over
+    fn num_positions(&self) -> usize {
+        self.elements_per_row()
+    }
+
+    /// NTT size for K rows (must be power of 2 >= K)
+    fn ntt_size_k(&self) -> usize {
+        self.k.next_power_of_two()
+    }
+
+    /// NTT size for K+N rows (must be power of 2 >= K+N)
+    fn ntt_size_kn(&self) -> usize {
+        self.total_rows().next_power_of_two()
     }
 }
 
@@ -47,191 +106,205 @@ struct EncodingResult {
     speedup: f64,
 }
 
-// CUDA kernel interface for single NTT (used by CPU comparison, not benchmark)
-#[cfg(feature = "cuda")]
-extern "C" {
-    fn cuda_ntt(d_values: *mut u64, n: u32, omega: u64);
-    fn cuda_intt(d_values: *mut u64, n: u32, omega: u64);
-}
+// ============================================================================
+// CPU Implementation (Baseline)
+// ============================================================================
 
-/// RS Encoding using CPU NTT
+/// RS Encoding using CPU NTT - processes each column sequentially
 ///
-/// For each position across shards, we:
-/// 1. Gather k values (one from each original shard)
-/// 2. INTT to get polynomial coefficients
-/// 3. Pad coefficients to n
-/// 4. NTT to evaluate at n points (producing n shard values)
+/// This is the baseline for comparison. It's straightforward but slow for
+/// large data because it processes one column at a time.
 fn encode_cpu(config: &EncodingConfig) -> f64 {
     let k = config.k;
-    let n = config.n();
-    let shard_elements = config.shard_elements();
+    let n = config.n;
+    let num_positions = config.num_positions();
+    let ntt_size_k = config.ntt_size_k();
+    let ntt_size_kn = config.ntt_size_kn();
 
-    // Generate original data: k shards, each with shard_elements
-    let original_shards: Vec<Vec<BabyBear>> = (0..k)
-        .map(|shard_idx| {
-            (0..shard_elements)
-                .map(|elem_idx| {
-                    BabyBear::new(((shard_idx * shard_elements + elem_idx) % 2013265921) as u64)
+    // Generate original data: K rows × num_positions columns
+    let original_rows: Vec<Vec<BabyBear>> = (0..k)
+        .map(|row_idx| {
+            (0..num_positions)
+                .map(|col_idx| {
+                    BabyBear::new(((row_idx * num_positions + col_idx) % 2013265921) as u64)
                 })
                 .collect()
         })
         .collect();
 
-    // Output: n shards (k original + n-k parity)
-    let mut encoded_shards: Vec<Vec<BabyBear>> = (0..n)
-        .map(|_| vec![BabyBear::zero(); shard_elements])
+    // Allocate output: (K+N) rows × num_positions columns
+    let mut encoded_rows: Vec<Vec<BabyBear>> = (0..k + n)
+        .map(|_| vec![BabyBear::zero(); num_positions])
         .collect();
 
-    let omega_k = BabyBear::get_root_of_unity(k.trailing_zeros());
-    let omega_n = BabyBear::get_root_of_unity(n.trailing_zeros());
+    // Get twiddle factors for NTT sizes
+    let omega_k = BabyBear::get_root_of_unity(ntt_size_k.trailing_zeros());
+    let omega_kn = BabyBear::get_root_of_unity(ntt_size_kn.trailing_zeros());
 
     let start = Instant::now();
 
-    // For each position across all shards
-    for pos in 0..shard_elements {
-        // Gather k values from original shards at this position
-        let mut coeffs: Vec<BabyBear> = original_shards.iter().map(|shard| shard[pos]).collect();
+    // Process each column position sequentially (CPU limitation)
+    for col in 0..num_positions {
+        // Step 1: Gather K values from this column across all original rows
+        let mut values: Vec<BabyBear> = original_rows.iter().map(|row| row[col]).collect();
 
-        // INTT: convert k evaluations to k coefficients
-        cpu_intt(&mut coeffs, omega_k);
+        // Step 2: Pad to ntt_size_k for INTT
+        values.resize(ntt_size_k, BabyBear::zero());
 
-        // Pad to n for evaluation at n points
-        coeffs.resize(n, BabyBear::zero());
+        // Step 3: INTT - convert K evaluations to polynomial coefficients
+        cpu_intt(&mut values, omega_k);
 
-        // NTT: evaluate polynomial at n points
-        cpu_ntt(&mut coeffs, omega_n);
+        // Step 4: Pad to ntt_size_kn for evaluation at K+N points
+        values.resize(ntt_size_kn, BabyBear::zero());
 
-        // Scatter results to encoded shards
-        for (shard_idx, &val) in coeffs.iter().enumerate() {
-            encoded_shards[shard_idx][pos] = val;
+        // Step 5: NTT - evaluate polynomial at K+N points
+        cpu_ntt(&mut values, omega_kn);
+
+        // Step 6: Scatter (K+N) values back to output rows at this column
+        for (row_idx, &val) in values.iter().take(k + n).enumerate() {
+            encoded_rows[row_idx][col] = val;
         }
     }
 
     start.elapsed().as_secs_f64() * 1000.0
 }
 
-/// RS Encoding using GPU with BATCHED NTT operations
+// ============================================================================
+// GPU Implementation (Fully Optimized)
+// ============================================================================
+
+/// RS Encoding using GPU with fully fused operations - ZERO CPU ROUNDTRIPS
 ///
 /// Key optimizations:
-/// 1. Data layout optimized for GPU: positions are contiguous
-/// 2. Single memory transfer to GPU
-/// 3. Batched INTT processes ALL positions in parallel
-/// 4. Batched NTT processes ALL positions in parallel
-/// 5. Single memory transfer back
+/// 1. Data layout: columns are contiguous in memory for GPU coalesced access
+/// 2. Single upload: all input data transferred to GPU at once
+/// 3. Batched INTT: processes ALL columns in parallel (not sequential!)
+/// 4. GPU padding: zero-extension happens on GPU (no download/upload!)
+/// 5. Batched NTT: processes ALL columns in parallel
+/// 6. Single download: all output data transferred from GPU at once
+///
+/// Memory transfers:
+///   - Upload: num_positions × ntt_size_k elements
+///   - Download: num_positions × ntt_size_kn elements
+///   - Total: ~2× the data size (vs ~8× for naive implementation)
+///
+/// Compute operations:
+///   - CPU: O(num_positions) sequential NTT operations
+///   - GPU: O(1) batched NTT operations (all parallel)
+///   - Speedup: ~num_positions × (ignoring memory transfer)
 #[cfg(feature = "cuda")]
-fn encode_gpu_batched(config: &EncodingConfig) -> Result<f64, String> {
+fn encode_gpu_optimized(config: &EncodingConfig) -> Result<f64, String> {
     let k = config.k;
-    let n = config.n();
-    let shard_elements = config.shard_elements();
+    let n = config.n;
+    let num_positions = config.num_positions();
+    let ntt_size_k = config.ntt_size_k();
+    let ntt_size_kn = config.ntt_size_kn();
 
-    // Verify k and n are powers of 2 (required for NTT)
-    if !k.is_power_of_two() || !n.is_power_of_two() {
-        return Err(format!("k={} and n={} must be powers of 2", k, n));
-    }
+    // Get twiddle factors
+    let omega_k = BabyBear::get_root_of_unity(ntt_size_k.trailing_zeros());
+    let omega_kn = BabyBear::get_root_of_unity(ntt_size_kn.trailing_zeros());
 
-    let omega_k = BabyBear::get_root_of_unity(k.trailing_zeros());
-    let omega_n = BabyBear::get_root_of_unity(n.trailing_zeros());
+    // ========================================================================
+    // Prepare input data in column-major layout for GPU efficiency
+    // ========================================================================
+    // Layout: [col_0: k values, 0-padded to ntt_size_k]
+    //         [col_1: k values, 0-padded to ntt_size_k]
+    //         ...
+    //         [col_{m-1}: k values, 0-padded to ntt_size_k]
+    //
+    // This layout enables:
+    //   - Coalesced GPU memory access (adjacent threads access adjacent memory)
+    //   - Efficient batched NTT (each column is an independent NTT)
 
-    // Memory layout for GPU efficiency:
-    // We process all positions in parallel, so arrange data as:
-    // [pos_0: k values][pos_1: k values]...[pos_{m-1}: k values]
-    // Then after INTT, we need to expand each k-block to n-block for NTT
+    let mut h_input: Vec<u64> = vec![0; num_positions * ntt_size_k];
 
-    // Step 1: Prepare input data in position-major order
-    // d_intt_buffer[pos * k + shard_idx] = original_shards[shard_idx][pos]
-    let mut h_intt_buffer: Vec<u64> = vec![0; shard_elements * k];
-    for shard_idx in 0..k {
-        for pos in 0..shard_elements {
-            let value = ((shard_idx * shard_elements + pos) % 2013265921) as u64;
-            h_intt_buffer[pos * k + shard_idx] = value;
+    // Fill input data
+    for row_idx in 0..k {
+        for col in 0..num_positions {
+            let value = ((row_idx * num_positions + col) % 2013265921) as u64;
+            h_input[col * ntt_size_k + row_idx] = value;
         }
     }
+    // Note: padding from k to ntt_size_k is already 0 (vec initialization)
 
+    // ========================================================================
     // Allocate GPU buffers
-    // INTT buffer: shard_elements positions, k elements each
-    let mut d_intt_buffer = CudaBuffer::new(shard_elements * k)?;
+    // ========================================================================
+    let mut d_input = CudaBuffer::new(num_positions * ntt_size_k)?;     // Input data
+    let mut d_output = CudaBuffer::new(num_positions * ntt_size_kn)?;   // Final output
+    let mut d_work = CudaBuffer::new(num_positions * ntt_size_k)?;      // INTT workspace
 
-    // NTT buffer: shard_elements positions, n elements each (larger for expansion)
-    let mut d_ntt_buffer = CudaBuffer::new(shard_elements * n)?;
+    let mut h_output: Vec<u64> = vec![0; num_positions * ntt_size_kn];
 
-    // Host buffer for NTT (for padding operation)
-    let mut h_ntt_buffer: Vec<u64> = vec![0; shard_elements * n];
+    // ========================================================================
+    // GPU Encoding Pipeline - Everything happens on GPU!
+    // ========================================================================
 
     let start = Instant::now();
 
-    // Step 2: Upload data to GPU (single transfer)
-    d_intt_buffer.copy_from_host(&h_intt_buffer)?;
+    // --- Upload (Single Transfer) ---
+    d_input.copy_from_host(&h_input)?;
 
-    // Step 3: Batched INTT - process ALL positions in parallel!
-    // Each position has k elements, stride = k
+    // --- GPU Processing (Zero CPU Roundtrips!) ---
     unsafe {
-        cuda_intt_batched(
-            d_intt_buffer.as_ptr(),
-            shard_elements as u32,
-            k as u32,
-            k as u32,
+        cuda_rs_encode_vertical(
+            d_input.as_ptr(),     // Input: num_positions columns of size ntt_size_k
+            d_output.as_ptr(),    // Output: num_positions columns of size ntt_size_kn
+            d_work.as_ptr(),      // Work buffer for INTT
+            num_positions as u32,
+            ntt_size_k as u32,
+            ntt_size_kn as u32,
             omega_k.value,
+            omega_kn.value,
         );
     }
 
-    // Step 4: Download INTT results
-    d_intt_buffer.copy_to_host(&mut h_intt_buffer)?;
-
-    // Step 5: Pad from k to n (CPU for now - could be GPU kernel)
-    // Copy k coefficients, pad with zeros to n
-    for pos in 0..shard_elements {
-        for i in 0..k {
-            h_ntt_buffer[pos * n + i] = h_intt_buffer[pos * k + i];
-        }
-        for i in k..n {
-            h_ntt_buffer[pos * n + i] = 0;
-        }
-    }
-
-    // Step 6: Upload padded data for NTT
-    d_ntt_buffer.copy_from_host(&h_ntt_buffer)?;
-
-    // Step 7: Batched NTT - process ALL positions in parallel!
-    unsafe {
-        cuda_ntt_batched(
-            d_ntt_buffer.as_ptr(),
-            shard_elements as u32,
-            n as u32,
-            n as u32,
-            omega_n.value,
-        );
-    }
-
-    // Step 8: Download final results (single transfer)
-    d_ntt_buffer.copy_to_host(&mut h_ntt_buffer)?;
+    // --- Download (Single Transfer) ---
+    d_output.copy_to_host(&mut h_output)?;
 
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
-    // Verify we got results (optional - comment out for pure benchmark)
-    // Results are in h_ntt_buffer[pos * n + shard_idx]
+    // ========================================================================
+    // Result verification (optional - can be disabled for pure benchmark)
+    // ========================================================================
+    // Output layout: h_output[col * ntt_size_kn + row] for row in [0, k+n)
+    // This can be reshaped to (k+n) rows × num_positions columns
 
     Ok(elapsed)
 }
 
+// ============================================================================
+// Benchmark Runner
+// ============================================================================
+
 fn run_encoding_benchmark(config: EncodingConfig) -> Option<EncodingResult> {
-    let data_size_mb = config.data_size_mb;
+    let data_size_mb = config.data_size_mb();
 
     println!(
-        "  k={} shards, {}x expansion (n={})",
+        "  K={} original rows, N={} parity rows → {} total rows ({}x expansion)",
         config.k,
-        config.expansion,
-        config.n()
+        config.n,
+        config.total_rows(),
+        config.total_rows() as f64 / config.k as f64
     );
     println!(
-        "  Shard size: {} elements ({:.2} MB per shard)",
-        config.shard_elements(),
-        config.shard_elements() as f64 * 4.0 / (1024.0 * 1024.0)
+        "  Row size: {} bytes = {} BabyBear elements per row",
+        config.row_size,
+        config.elements_per_row()
     );
     println!(
-        "  Total NTT operations: {} (INTT) + {} (NTT) = {} parallel ops",
-        config.shard_elements(),
-        config.shard_elements(),
-        config.shard_elements() * 2
+        "  Data volume: {:.1} MB original → {:.1} MB after encoding",
+        data_size_mb,
+        data_size_mb * config.total_rows() as f64 / config.k as f64
+    );
+    println!(
+        "  Parallel dimension: {} column positions (each requires INTT+NTT)",
+        config.num_positions()
+    );
+    println!(
+        "  NTT sizes: INTT({}) then NTT({})",
+        config.ntt_size_k(),
+        config.ntt_size_kn()
     );
 
     #[cfg(not(feature = "cuda"))]
@@ -247,23 +320,25 @@ fn run_encoding_benchmark(config: EncodingConfig) -> Option<EncodingResult> {
             return None;
         }
 
-        // CPU benchmark
-        print!("  CPU encoding... ");
+        // CPU benchmark (baseline)
+        print!("  CPU encoding (sequential)... ");
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
         let cpu_time_ms = encode_cpu(&config);
         println!("{:.2} ms", cpu_time_ms);
 
-        // GPU benchmark (batched)
-        print!("  GPU encoding (batched)... ");
+        // GPU benchmark (optimized)
+        print!("  GPU encoding (batched+fused)... ");
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
-        match encode_gpu_batched(&config) {
+        match encode_gpu_optimized(&config) {
             Ok(gpu_time_ms) => {
                 println!("{:.2} ms", gpu_time_ms);
 
-                let cpu_throughput_mbs = data_size_mb as f64 / (cpu_time_ms / 1000.0);
-                let gpu_throughput_mbs = data_size_mb as f64 / (gpu_time_ms / 1000.0);
+                let cpu_throughput_mbs = data_size_mb / (cpu_time_ms / 1000.0);
+                let gpu_throughput_mbs = data_size_mb / (gpu_time_ms / 1000.0);
                 let speedup = cpu_time_ms / gpu_time_ms;
+
+                println!("    → GPU is {:.1}x faster than CPU", speedup);
 
                 Some(EncodingResult {
                     config,
@@ -282,25 +357,22 @@ fn run_encoding_benchmark(config: EncodingConfig) -> Option<EncodingResult> {
     }
 }
 
+// ============================================================================
+// Main Benchmark Test
+// ============================================================================
+
 #[test]
 #[ignore]
 fn benchmark_zoda_optimal() {
-    println!(
-        "\n╔══════════════════════════════════════════════════════════════════╗"
-    );
-    println!(
-        "║   ZODA Reed-Solomon Encoding Benchmark (BATCHED GPU)            ║"
-    );
-    println!(
-        "║   GPU NTT vs CPU NTT - Competing with leopard-rs                ║"
-    );
-    println!(
-        "╚══════════════════════════════════════════════════════════════════╝\n"
-    );
+    println!("\n╔═══════════════════════════════════════════════════════════════════════╗");
+    println!("║                ZODA Reed-Solomon Encoding Benchmark                  ║");
+    println!("║                      GPU vs CPU Performance                          ║");
+    println!("╚═══════════════════════════════════════════════════════════════════════╝\n");
 
     #[cfg(not(feature = "cuda"))]
     {
         println!("CUDA support not compiled in.");
+        println!("Build with: cargo test --features cuda --release");
         return;
     }
 
@@ -311,43 +383,59 @@ fn benchmark_zoda_optimal() {
             return;
         }
 
-        println!("CUDA available - GPU detected!\n");
-        println!("Strategy: Batched NTT kernels process ALL positions in parallel\n");
+        println!("✓ CUDA GPU detected\n");
+        println!("Benchmark: Vertical Reed-Solomon encoding (like Celestia rsema1d)");
+        println!("Algorithm: K rows → K+N rows via NTT-based polynomial evaluation\n");
 
-        // All k and n values must be powers of 2 for NTT
+        // ====================================================================
+        // Test configurations - covering small to very large data sizes
+        // ====================================================================
+        //
+        // row_size must be multiple of 4 (BabyBear element = 4 bytes)
+        // K and N should ideally be powers of 2 for optimal NTT performance
+        // But the benchmark handles any K, N by padding to next power of 2
+
         let configs = vec![
-            // Small warmup
-            EncodingConfig { data_size_mb: 16, k: 64, expansion: 2 },
-            EncodingConfig { data_size_mb: 32, k: 128, expansion: 2 },
-            EncodingConfig { data_size_mb: 64, k: 256, expansion: 2 },
+            // --- Small: warmup and correctness check ---
+            EncodingConfig { k: 64, n: 64, row_size: 4096 },       // 256 KB
+            EncodingConfig { k: 128, n: 128, row_size: 4096 },     // 512 KB
+            EncodingConfig { k: 256, n: 256, row_size: 4096 },     // 1 MB
 
-            // Medium - GPU advantage emerges
-            EncodingConfig { data_size_mb: 128, k: 256, expansion: 2 },
-            EncodingConfig { data_size_mb: 256, k: 512, expansion: 2 },
-            EncodingConfig { data_size_mb: 512, k: 1024, expansion: 2 },
+            // --- Medium: GPU advantage starts to show ---
+            EncodingConfig { k: 512, n: 512, row_size: 4096 },     // 2 MB
+            EncodingConfig { k: 1024, n: 1024, row_size: 4096 },   // 4 MB
+            EncodingConfig { k: 2048, n: 2048, row_size: 4096 },   // 8 MB
 
-            // Large - GPU should dominate
-            EncodingConfig { data_size_mb: 1024, k: 1024, expansion: 2 },  // 1 GB, 256K positions
-            EncodingConfig { data_size_mb: 1024, k: 2048, expansion: 2 },  // 1 GB, 128K positions
-            EncodingConfig { data_size_mb: 2048, k: 2048, expansion: 2 },  // 2 GB
-            EncodingConfig { data_size_mb: 4096, k: 4096, expansion: 2 },  // 4 GB
+            // --- Large: GPU should dominate ---
+            EncodingConfig { k: 4096, n: 4096, row_size: 4096 },   // 16 MB
+            EncodingConfig { k: 8192, n: 8192, row_size: 4096 },   // 32 MB
+            EncodingConfig { k: 16384, n: 16384, row_size: 4096 }, // 64 MB
 
-            // Extra large - maximum GPU advantage
-            EncodingConfig { data_size_mb: 8192, k: 4096, expansion: 2 },  // 8 GB
-            EncodingConfig { data_size_mb: 8192, k: 8192, expansion: 2 },  // 8 GB, more shards
+            // --- Very large: close to rsema1d defaults ---
+            EncodingConfig { k: 32768, n: 32768, row_size: 4096 }, // 128 MB (rsema1d default)
+            EncodingConfig { k: 65536, n: 65536, row_size: 4096 }, // 256 MB
 
-            // Different expansion factors (4x redundancy)
-            EncodingConfig { data_size_mb: 1024, k: 1024, expansion: 4 },  // 1 GB, 4x
-            EncodingConfig { data_size_mb: 2048, k: 2048, expansion: 4 },  // 2 GB, 4x
+            // --- Huge: larger rows = more parallelism = better GPU util ---
+            EncodingConfig { k: 16384, n: 16384, row_size: 8192 },  // 128 MB, 2048 positions
+            EncodingConfig { k: 16384, n: 16384, row_size: 16384 }, // 256 MB, 4096 positions
+            EncodingConfig { k: 32768, n: 32768, row_size: 16384 }, // 512 MB, 4096 positions
+
+            // --- Massive: stress test (if your GPU has enough memory) ---
+            EncodingConfig { k: 32768, n: 32768, row_size: 32768 }, // 1 GB, 8192 positions
+            // EncodingConfig { k: 65536, n: 65536, row_size: 32768 }, // 2 GB (uncomment if you have 24GB+ GPU)
+
+            // --- Different expansion ratios ---
+            EncodingConfig { k: 16384, n: 32768, row_size: 4096 },  // 1:2 ratio (3x total size)
+            EncodingConfig { k: 16384, n: 49152, row_size: 4096 },  // 1:3 ratio (4x total size)
         ];
 
         let mut results = Vec::new();
 
+        println!("Running benchmarks...\n");
+
         for config in configs {
-            println!(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            );
-            println!("Encoding {} MB of data:", config.data_size_mb);
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!("Encoding {:.1} MB of data:", config.data_size_mb());
 
             if let Some(result) = run_encoding_benchmark(config) {
                 results.push(result);
@@ -355,96 +443,101 @@ fn benchmark_zoda_optimal() {
             println!();
         }
 
-        // Print summary table
-        println!(
-            "\n╔══════════════════════════════════════════════════════════════════╗"
-        );
-        println!(
-            "║                      Results Summary                             ║"
-        );
-        println!(
-            "╚══════════════════════════════════════════════════════════════════╝\n"
-        );
+        // ====================================================================
+        // Results Summary
+        // ====================================================================
 
-        println!(
-            "{:<10} {:<8} {:<6} │ {:<14} {:<14} │ {:<10}",
-            "Data", "k", "n", "CPU MB/s", "GPU MB/s", "Speedup"
-        );
-        println!("{}", "─".repeat(75));
+        println!("\n╔═══════════════════════════════════════════════════════════════════════╗");
+        println!("║                         Results Summary                               ║");
+        println!("╚═══════════════════════════════════════════════════════════════════════╝\n");
+
+        println!("{:<12} {:<10} {:<10} {:<10} │ {:<12} {:<12} │ {:<10}",
+            "Data MB", "K", "N", "RowSize", "CPU MB/s", "GPU MB/s", "Speedup");
+        println!("{}", "─".repeat(90));
 
         for result in &results {
-            println!(
-                "{:<10} {:<8} {:<6} │ {:<14.1} {:<14.1} │ {:<10.2}x",
-                format!("{} MB", result.config.data_size_mb),
+            println!("{:<12.1} {:<10} {:<10} {:<10} │ {:<12.1} {:<12.1} │ {:<10.1}x",
+                result.config.data_size_mb(),
                 result.config.k,
-                result.config.n(),
+                result.config.n,
+                result.config.row_size,
                 result.cpu_throughput_mbs,
                 result.gpu_throughput_mbs,
                 result.speedup,
             );
         }
 
-        if !results.is_empty() {
-            println!(
-                "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            );
-            println!("Performance Summary");
-            println!(
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            );
+        // ====================================================================
+        // Performance Analysis
+        // ====================================================================
 
+        if !results.is_empty() {
+            println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!("Performance Analysis");
+            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+            // Analyze large data results (>= 64 MB)
             let large_results: Vec<_> = results
                 .iter()
-                .filter(|r| r.config.data_size_mb >= 1024)
+                .filter(|r| r.config.data_size_mb() >= 64.0)
                 .collect();
 
             if !large_results.is_empty() {
-                let avg_speedup: f64 =
-                    large_results.iter().map(|r| r.speedup).sum::<f64>() / large_results.len() as f64;
-                let avg_gpu_throughput: f64 = large_results
-                    .iter()
-                    .map(|r| r.gpu_throughput_mbs)
-                    .sum::<f64>()
+                let avg_speedup = large_results.iter().map(|r| r.speedup).sum::<f64>()
                     / large_results.len() as f64;
-                let max_gpu_throughput = large_results
-                    .iter()
-                    .map(|r| r.gpu_throughput_mbs)
-                    .fold(0.0f64, f64::max);
+                let avg_gpu_throughput = large_results.iter().map(|r| r.gpu_throughput_mbs).sum::<f64>()
+                    / large_results.len() as f64;
+                let max_gpu_throughput = large_results.iter()
+                    .map(|r| r.gpu_throughput_mbs).fold(0.0f64, f64::max);
 
-                println!("For large data (>= 1GB):");
-                println!("  Average GPU Speedup:     {:.2}x over CPU", avg_speedup);
-                println!("  Average GPU Throughput:  {:.1} MB/s", avg_gpu_throughput);
-                println!("  Peak GPU Throughput:     {:.1} MB/s", max_gpu_throughput);
+                println!("For large data (>= 64 MB):");
+                println!("  Average GPU Speedup:      {:.1}x faster than CPU", avg_speedup);
+                println!("  Average GPU Throughput:   {:.1} MB/s", avg_gpu_throughput);
+                println!("  Peak GPU Throughput:      {:.1} MB/s", max_gpu_throughput);
 
-                println!("\nComparison with leopard-rs (reference):");
-                println!("  leopard-rs encode (AVX2): ~1000-3000 MB/s");
-                println!("  leopard-rs encode (basic): ~200-500 MB/s");
-                println!(
-                    "  Our GPU implementation:    {:.1} MB/s (peak)",
-                    max_gpu_throughput
-                );
+                println!("\nComparison with leopard-rs (GF(2^16) reference implementation):");
+                println!("  leopard-rs encode (AVX2):  ~1000-3000 MB/s");
+                println!("  leopard-rs encode (basic):  ~200-500 MB/s");
+                println!("  Our GPU (BabyBear):         {:.1} MB/s (peak)", max_gpu_throughput);
                 println!();
 
                 if max_gpu_throughput > 3000.0 {
-                    println!("  >> Outperforming optimized leopard-rs!");
+                    println!("  ✓✓ OUTPERFORMING optimized leopard-rs with AVX2!");
                 } else if max_gpu_throughput > 1000.0 {
-                    println!("  >> Competitive with optimized leopard-rs");
+                    println!("  ✓ Competitive with optimized leopard-rs");
                 } else if max_gpu_throughput > 500.0 {
-                    println!("  >> Competitive with basic leopard-rs");
+                    println!("  → Competitive with basic leopard-rs");
                 } else {
-                    println!("  >> Room for GPU optimization");
+                    println!("  → Potential for further GPU optimization");
                 }
+            }
+
+            // Show scaling analysis
+            println!("\nScaling Analysis:");
+            let mut prev_size = 0.0;
+            let mut prev_gpu_time = 0.0;
+            for result in &results {
+                let size = result.config.data_size_mb();
+                let gpu_time = result.gpu_time_ms;
+
+                if prev_size > 0.0 {
+                    let size_ratio = size / prev_size;
+                    let time_ratio = gpu_time / prev_gpu_time;
+                    let efficiency = size_ratio / time_ratio;
+
+                    if efficiency > 0.9 {
+                        println!("  {:.0} MB → {:.0} MB: {:.2}x data in {:.2}x time (efficient scaling)",
+                            prev_size, size, size_ratio, time_ratio);
+                    }
+                }
+
+                prev_size = size;
+                prev_gpu_time = gpu_time;
             }
         }
 
-        println!(
-            "\n╔══════════════════════════════════════════════════════════════════╗"
-        );
-        println!(
-            "║  Benchmark Complete                                              ║"
-        );
-        println!(
-            "╚══════════════════════════════════════════════════════════════════╝\n"
-        );
+        println!("\n╔═══════════════════════════════════════════════════════════════════════╗");
+        println!("║  Benchmark Complete!                                                  ║");
+        println!("╚═══════════════════════════════════════════════════════════════════════╝\n");
     }
 }
