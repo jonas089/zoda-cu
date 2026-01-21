@@ -3,19 +3,25 @@
 //
 // This measures actual RS encoding: given k data shards, produce n total shards
 // using NTT-based polynomial interpolation/evaluation.
+//
+// GPU optimization strategy:
+// - Single memory transfer to GPU
+// - Batched NTT kernels process ALL positions in parallel
+// - Single memory transfer back
+// - This gives GPU massive parallelism advantage on large data
 
 use crate::babybear::BabyBear;
 use crate::ntt_babybear::{intt as cpu_intt, ntt as cpu_ntt};
 use std::time::Instant;
 
 #[cfg(feature = "cuda")]
-use crate::cuda_ntt::{cuda_available, CudaBuffer};
+use crate::cuda_ntt::{cuda_available, cuda_intt_batched, cuda_ntt_batched, CudaBuffer};
 
 #[derive(Debug, Clone)]
 struct EncodingConfig {
-    data_size_mb: usize,    // Original data size in MB
-    k: usize,               // Number of original data shards
-    expansion: usize,       // Expansion factor (n = k * expansion)
+    data_size_mb: usize, // Original data size in MB
+    k: usize,            // Number of original data shards (must be power of 2)
+    expansion: usize,    // Expansion factor (n = k * expansion, n must be power of 2)
 }
 
 impl EncodingConfig {
@@ -29,11 +35,6 @@ impl EncodingConfig {
         // We treat each u32 as one BabyBear element
         (self.data_size_mb * 1024 * 1024) / self.k / 4
     }
-
-    fn ntt_size(&self) -> usize {
-        // NTT size must be >= n and a power of 2
-        self.n().next_power_of_two()
-    }
 }
 
 #[derive(Debug)]
@@ -46,7 +47,7 @@ struct EncodingResult {
     speedup: f64,
 }
 
-// CUDA kernel interface
+// CUDA kernel interface for single NTT (used by CPU comparison, not benchmark)
 #[cfg(feature = "cuda")]
 extern "C" {
     fn cuda_ntt(d_values: *mut u64, n: u32, omega: u64);
@@ -63,14 +64,15 @@ extern "C" {
 fn encode_cpu(config: &EncodingConfig) -> f64 {
     let k = config.k;
     let n = config.n();
-    let ntt_size = config.ntt_size();
     let shard_elements = config.shard_elements();
 
     // Generate original data: k shards, each with shard_elements
     let original_shards: Vec<Vec<BabyBear>> = (0..k)
         .map(|shard_idx| {
             (0..shard_elements)
-                .map(|elem_idx| BabyBear::new(((shard_idx * shard_elements + elem_idx) % 2013265921) as u64))
+                .map(|elem_idx| {
+                    BabyBear::new(((shard_idx * shard_elements + elem_idx) % 2013265921) as u64)
+                })
                 .collect()
         })
         .collect();
@@ -81,28 +83,26 @@ fn encode_cpu(config: &EncodingConfig) -> f64 {
         .collect();
 
     let omega_k = BabyBear::get_root_of_unity(k.trailing_zeros());
-    let omega_n = BabyBear::get_root_of_unity(ntt_size.trailing_zeros());
+    let omega_n = BabyBear::get_root_of_unity(n.trailing_zeros());
 
     let start = Instant::now();
 
     // For each position across all shards
     for pos in 0..shard_elements {
         // Gather k values from original shards at this position
-        let mut coeffs: Vec<BabyBear> = original_shards.iter()
-            .map(|shard| shard[pos])
-            .collect();
+        let mut coeffs: Vec<BabyBear> = original_shards.iter().map(|shard| shard[pos]).collect();
 
         // INTT: convert k evaluations to k coefficients
         cpu_intt(&mut coeffs, omega_k);
 
-        // Pad to ntt_size for evaluation at n points
-        coeffs.resize(ntt_size, BabyBear::zero());
+        // Pad to n for evaluation at n points
+        coeffs.resize(n, BabyBear::zero());
 
         // NTT: evaluate polynomial at n points
         cpu_ntt(&mut coeffs, omega_n);
 
         // Scatter results to encoded shards
-        for (shard_idx, &val) in coeffs.iter().take(n).enumerate() {
+        for (shard_idx, &val) in coeffs.iter().enumerate() {
             encoded_shards[shard_idx][pos] = val;
         }
     }
@@ -110,123 +110,129 @@ fn encode_cpu(config: &EncodingConfig) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
-/// RS Encoding using GPU NTT with batched transfers
+/// RS Encoding using GPU with BATCHED NTT operations
+///
+/// Key optimizations:
+/// 1. Data layout optimized for GPU: positions are contiguous
+/// 2. Single memory transfer to GPU
+/// 3. Batched INTT processes ALL positions in parallel
+/// 4. Batched NTT processes ALL positions in parallel
+/// 5. Single memory transfer back
 #[cfg(feature = "cuda")]
-fn encode_gpu(config: &EncodingConfig) -> Result<f64, String> {
+fn encode_gpu_batched(config: &EncodingConfig) -> Result<f64, String> {
     let k = config.k;
     let n = config.n();
-    let ntt_size = config.ntt_size();
     let shard_elements = config.shard_elements();
 
-    // For GPU, we batch all position NTTs together
-    // We'll process in batches to manage memory
+    // Verify k and n are powers of 2 (required for NTT)
+    if !k.is_power_of_two() || !n.is_power_of_two() {
+        return Err(format!("k={} and n={} must be powers of 2", k, n));
+    }
 
     let omega_k = BabyBear::get_root_of_unity(k.trailing_zeros());
-    let omega_n = BabyBear::get_root_of_unity(ntt_size.trailing_zeros());
+    let omega_n = BabyBear::get_root_of_unity(n.trailing_zeros());
 
-    // Generate original data
-    let original_data: Vec<u64> = (0..k)
-        .flat_map(|shard_idx| {
-            (0..shard_elements)
-                .map(move |elem_idx| ((shard_idx * shard_elements + elem_idx) % 2013265921) as u64)
-        })
-        .collect();
+    // Memory layout for GPU efficiency:
+    // We process all positions in parallel, so arrange data as:
+    // [pos_0: k values][pos_1: k values]...[pos_{m-1}: k values]
+    // Then after INTT, we need to expand each k-block to n-block for NTT
 
-    // Batch size for GPU processing (number of positions to process at once)
-    // Each position needs ntt_size elements
-    let gpu_batch_size = (64 * 1024 * 1024 / (ntt_size * 8)).max(1024); // ~64MB GPU buffer per batch
-    let num_batches = (shard_elements + gpu_batch_size - 1) / gpu_batch_size;
-
-    // Allocate GPU buffers
-    // For INTT: k elements per position, batch_size positions
-    let intt_buffer_size = k.next_power_of_two() * gpu_batch_size;
-    // For NTT: ntt_size elements per position, batch_size positions
-    let ntt_buffer_size = ntt_size * gpu_batch_size;
-
-    let mut d_intt_buffer = CudaBuffer::new(intt_buffer_size)?;
-    let mut d_ntt_buffer = CudaBuffer::new(ntt_buffer_size)?;
-
-    let mut intt_host: Vec<u64> = vec![0; intt_buffer_size];
-    let mut ntt_host: Vec<u64> = vec![0; ntt_buffer_size];
-
-    // Output storage
-    let mut encoded_shards: Vec<Vec<u64>> = (0..n)
-        .map(|_| vec![0u64; shard_elements])
-        .collect();
-
-    let start = Instant::now();
-
-    for batch_idx in 0..num_batches {
-        let batch_start = batch_idx * gpu_batch_size;
-        let batch_end = (batch_start + gpu_batch_size).min(shard_elements);
-        let actual_batch_size = batch_end - batch_start;
-
-        // Gather data for this batch: for each position, collect k values
-        for (local_pos, global_pos) in (batch_start..batch_end).enumerate() {
-            for shard_idx in 0..k {
-                intt_host[local_pos * k.next_power_of_two() + shard_idx] =
-                    original_data[shard_idx * shard_elements + global_pos];
-            }
-            // Zero-pad to power of 2 for INTT
-            for pad_idx in k..k.next_power_of_two() {
-                intt_host[local_pos * k.next_power_of_two() + pad_idx] = 0;
-            }
-        }
-
-        // Copy to GPU and run batched INTTs
-        d_intt_buffer.copy_from_host(&intt_host)?;
-
-        unsafe {
-            for local_pos in 0..actual_batch_size {
-                let ptr = d_intt_buffer.as_ptr().add(local_pos * k.next_power_of_two());
-                cuda_intt(ptr, k.next_power_of_two() as u32, omega_k.value);
-            }
-        }
-
-        d_intt_buffer.copy_to_host(&mut intt_host)?;
-
-        // Prepare NTT buffer: copy coefficients and zero-pad to ntt_size
-        for local_pos in 0..actual_batch_size {
-            for coeff_idx in 0..k {
-                ntt_host[local_pos * ntt_size + coeff_idx] =
-                    intt_host[local_pos * k.next_power_of_two() + coeff_idx];
-            }
-            for pad_idx in k..ntt_size {
-                ntt_host[local_pos * ntt_size + pad_idx] = 0;
-            }
-        }
-
-        // Copy to GPU and run batched NTTs
-        d_ntt_buffer.copy_from_host(&ntt_host)?;
-
-        unsafe {
-            for local_pos in 0..actual_batch_size {
-                let ptr = d_ntt_buffer.as_ptr().add(local_pos * ntt_size);
-                cuda_ntt(ptr, ntt_size as u32, omega_n.value);
-            }
-        }
-
-        d_ntt_buffer.copy_to_host(&mut ntt_host)?;
-
-        // Scatter results to encoded shards
-        for (local_pos, global_pos) in (batch_start..batch_end).enumerate() {
-            for shard_idx in 0..n {
-                encoded_shards[shard_idx][global_pos] = ntt_host[local_pos * ntt_size + shard_idx];
-            }
+    // Step 1: Prepare input data in position-major order
+    // d_intt_buffer[pos * k + shard_idx] = original_shards[shard_idx][pos]
+    let mut h_intt_buffer: Vec<u64> = vec![0; shard_elements * k];
+    for shard_idx in 0..k {
+        for pos in 0..shard_elements {
+            let value = ((shard_idx * shard_elements + pos) % 2013265921) as u64;
+            h_intt_buffer[pos * k + shard_idx] = value;
         }
     }
 
-    Ok(start.elapsed().as_secs_f64() * 1000.0)
+    // Allocate GPU buffers
+    // INTT buffer: shard_elements positions, k elements each
+    let mut d_intt_buffer = CudaBuffer::new(shard_elements * k)?;
+
+    // NTT buffer: shard_elements positions, n elements each (larger for expansion)
+    let mut d_ntt_buffer = CudaBuffer::new(shard_elements * n)?;
+
+    // Host buffer for NTT (for padding operation)
+    let mut h_ntt_buffer: Vec<u64> = vec![0; shard_elements * n];
+
+    let start = Instant::now();
+
+    // Step 2: Upload data to GPU (single transfer)
+    d_intt_buffer.copy_from_host(&h_intt_buffer)?;
+
+    // Step 3: Batched INTT - process ALL positions in parallel!
+    // Each position has k elements, stride = k
+    unsafe {
+        cuda_intt_batched(
+            d_intt_buffer.as_ptr(),
+            shard_elements as u32,
+            k as u32,
+            k as u32,
+            omega_k.value,
+        );
+    }
+
+    // Step 4: Download INTT results
+    d_intt_buffer.copy_to_host(&mut h_intt_buffer)?;
+
+    // Step 5: Pad from k to n (CPU for now - could be GPU kernel)
+    // Copy k coefficients, pad with zeros to n
+    for pos in 0..shard_elements {
+        for i in 0..k {
+            h_ntt_buffer[pos * n + i] = h_intt_buffer[pos * k + i];
+        }
+        for i in k..n {
+            h_ntt_buffer[pos * n + i] = 0;
+        }
+    }
+
+    // Step 6: Upload padded data for NTT
+    d_ntt_buffer.copy_from_host(&h_ntt_buffer)?;
+
+    // Step 7: Batched NTT - process ALL positions in parallel!
+    unsafe {
+        cuda_ntt_batched(
+            d_ntt_buffer.as_ptr(),
+            shard_elements as u32,
+            n as u32,
+            n as u32,
+            omega_n.value,
+        );
+    }
+
+    // Step 8: Download final results (single transfer)
+    d_ntt_buffer.copy_to_host(&mut h_ntt_buffer)?;
+
+    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+
+    // Verify we got results (optional - comment out for pure benchmark)
+    // Results are in h_ntt_buffer[pos * n + shard_idx]
+
+    Ok(elapsed)
 }
 
 fn run_encoding_benchmark(config: EncodingConfig) -> Option<EncodingResult> {
     let data_size_mb = config.data_size_mb;
 
-    println!("  k={} shards, {}x expansion (n={}), NTT size={}",
-        config.k, config.expansion, config.n(), config.ntt_size());
-    println!("  Shard size: {} elements ({:.2} MB per shard)",
+    println!(
+        "  k={} shards, {}x expansion (n={})",
+        config.k,
+        config.expansion,
+        config.n()
+    );
+    println!(
+        "  Shard size: {} elements ({:.2} MB per shard)",
         config.shard_elements(),
-        config.shard_elements() as f64 * 4.0 / (1024.0 * 1024.0));
+        config.shard_elements() as f64 * 4.0 / (1024.0 * 1024.0)
+    );
+    println!(
+        "  Total NTT operations: {} (INTT) + {} (NTT) = {} parallel ops",
+        config.shard_elements(),
+        config.shard_elements(),
+        config.shard_elements() * 2
+    );
 
     #[cfg(not(feature = "cuda"))]
     {
@@ -247,11 +253,11 @@ fn run_encoding_benchmark(config: EncodingConfig) -> Option<EncodingResult> {
         let cpu_time_ms = encode_cpu(&config);
         println!("{:.2} ms", cpu_time_ms);
 
-        // GPU benchmark
-        print!("  GPU encoding... ");
+        // GPU benchmark (batched)
+        print!("  GPU encoding (batched)... ");
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
-        match encode_gpu(&config) {
+        match encode_gpu_batched(&config) {
             Ok(gpu_time_ms) => {
                 println!("{:.2} ms", gpu_time_ms);
 
@@ -279,10 +285,18 @@ fn run_encoding_benchmark(config: EncodingConfig) -> Option<EncodingResult> {
 #[test]
 #[ignore]
 fn benchmark_zoda_optimal() {
-    println!("\n╔══════════════════════════════════════════════════════════════════╗");
-    println!("║   ZODA Reed-Solomon Encoding Benchmark                           ║");
-    println!("║   GPU NTT vs CPU NTT - Competing with leopard-rs                 ║");
-    println!("╚══════════════════════════════════════════════════════════════════╝\n");
+    println!(
+        "\n╔══════════════════════════════════════════════════════════════════╗"
+    );
+    println!(
+        "║   ZODA Reed-Solomon Encoding Benchmark (BATCHED GPU)            ║"
+    );
+    println!(
+        "║   GPU NTT vs CPU NTT - Competing with leopard-rs                ║"
+    );
+    println!(
+        "╚══════════════════════════════════════════════════════════════════╝\n"
+    );
 
     #[cfg(not(feature = "cuda"))]
     {
@@ -298,34 +312,41 @@ fn benchmark_zoda_optimal() {
         }
 
         println!("CUDA available - GPU detected!\n");
-        println!("Encoding: k original shards -> n total shards (n-k parity)\n");
+        println!("Strategy: Batched NTT kernels process ALL positions in parallel\n");
 
+        // All k and n values must be powers of 2 for NTT
         let configs = vec![
-            // Small sizes for warmup/baseline
+            // Small warmup
             EncodingConfig { data_size_mb: 16, k: 64, expansion: 2 },
             EncodingConfig { data_size_mb: 32, k: 128, expansion: 2 },
             EncodingConfig { data_size_mb: 64, k: 256, expansion: 2 },
 
-            // Medium sizes - GPU starts showing advantage
+            // Medium - GPU advantage emerges
             EncodingConfig { data_size_mb: 128, k: 256, expansion: 2 },
             EncodingConfig { data_size_mb: 256, k: 512, expansion: 2 },
             EncodingConfig { data_size_mb: 512, k: 1024, expansion: 2 },
 
-            // Large sizes - GPU should dominate
-            EncodingConfig { data_size_mb: 1024, k: 1024, expansion: 2 },    // 1 GB
-            EncodingConfig { data_size_mb: 1024, k: 2048, expansion: 2 },    // 1 GB, more shards
-            EncodingConfig { data_size_mb: 2048, k: 2048, expansion: 2 },    // 2 GB
-            EncodingConfig { data_size_mb: 4096, k: 4096, expansion: 2 },    // 4 GB
+            // Large - GPU should dominate
+            EncodingConfig { data_size_mb: 1024, k: 1024, expansion: 2 },  // 1 GB, 256K positions
+            EncodingConfig { data_size_mb: 1024, k: 2048, expansion: 2 },  // 1 GB, 128K positions
+            EncodingConfig { data_size_mb: 2048, k: 2048, expansion: 2 },  // 2 GB
+            EncodingConfig { data_size_mb: 4096, k: 4096, expansion: 2 },  // 4 GB
 
-            // Different expansion factors
-            EncodingConfig { data_size_mb: 1024, k: 1024, expansion: 4 },    // 1 GB, 4x expansion
-            EncodingConfig { data_size_mb: 2048, k: 2048, expansion: 4 },    // 2 GB, 4x expansion
+            // Extra large - maximum GPU advantage
+            EncodingConfig { data_size_mb: 8192, k: 4096, expansion: 2 },  // 8 GB
+            EncodingConfig { data_size_mb: 8192, k: 8192, expansion: 2 },  // 8 GB, more shards
+
+            // Different expansion factors (4x redundancy)
+            EncodingConfig { data_size_mb: 1024, k: 1024, expansion: 4 },  // 1 GB, 4x
+            EncodingConfig { data_size_mb: 2048, k: 2048, expansion: 4 },  // 2 GB, 4x
         ];
 
         let mut results = Vec::new();
 
         for config in configs {
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            );
             println!("Encoding {} MB of data:", config.data_size_mb);
 
             if let Some(result) = run_encoding_benchmark(config) {
@@ -335,16 +356,25 @@ fn benchmark_zoda_optimal() {
         }
 
         // Print summary table
-        println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║                      Results Summary                             ║");
-        println!("╚══════════════════════════════════════════════════════════════════╝\n");
+        println!(
+            "\n╔══════════════════════════════════════════════════════════════════╗"
+        );
+        println!(
+            "║                      Results Summary                             ║"
+        );
+        println!(
+            "╚══════════════════════════════════════════════════════════════════╝\n"
+        );
 
-        println!("{:<10} {:<8} {:<6} │ {:<14} {:<14} │ {:<10}",
-            "Data", "k", "n", "CPU MB/s", "GPU MB/s", "Speedup");
+        println!(
+            "{:<10} {:<8} {:<6} │ {:<14} {:<14} │ {:<10}",
+            "Data", "k", "n", "CPU MB/s", "GPU MB/s", "Speedup"
+        );
         println!("{}", "─".repeat(75));
 
         for result in &results {
-            println!("{:<10} {:<8} {:<6} │ {:<14.1} {:<14.1} │ {:<10.2}x",
+            println!(
+                "{:<10} {:<8} {:<6} │ {:<14.1} {:<14.1} │ {:<10.2}x",
                 format!("{} MB", result.config.data_size_mb),
                 result.config.k,
                 result.config.n(),
@@ -355,21 +385,31 @@ fn benchmark_zoda_optimal() {
         }
 
         if !results.is_empty() {
-            println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            println!(
+                "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            );
             println!("Performance Summary");
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+            println!(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            );
 
-            let large_results: Vec<_> = results.iter()
+            let large_results: Vec<_> = results
+                .iter()
                 .filter(|r| r.config.data_size_mb >= 1024)
                 .collect();
 
             if !large_results.is_empty() {
-                let avg_speedup: f64 = large_results.iter().map(|r| r.speedup).sum::<f64>()
+                let avg_speedup: f64 =
+                    large_results.iter().map(|r| r.speedup).sum::<f64>() / large_results.len() as f64;
+                let avg_gpu_throughput: f64 = large_results
+                    .iter()
+                    .map(|r| r.gpu_throughput_mbs)
+                    .sum::<f64>()
                     / large_results.len() as f64;
-                let avg_gpu_throughput: f64 = large_results.iter().map(|r| r.gpu_throughput_mbs).sum::<f64>()
-                    / large_results.len() as f64;
-                let max_gpu_throughput = large_results.iter()
-                    .map(|r| r.gpu_throughput_mbs).fold(0.0f64, f64::max);
+                let max_gpu_throughput = large_results
+                    .iter()
+                    .map(|r| r.gpu_throughput_mbs)
+                    .fold(0.0f64, f64::max);
 
                 println!("For large data (>= 1GB):");
                 println!("  Average GPU Speedup:     {:.2}x over CPU", avg_speedup);
@@ -379,7 +419,10 @@ fn benchmark_zoda_optimal() {
                 println!("\nComparison with leopard-rs (reference):");
                 println!("  leopard-rs encode (AVX2): ~1000-3000 MB/s");
                 println!("  leopard-rs encode (basic): ~200-500 MB/s");
-                println!("  Our GPU implementation:    {:.1} MB/s (peak)", max_gpu_throughput);
+                println!(
+                    "  Our GPU implementation:    {:.1} MB/s (peak)",
+                    max_gpu_throughput
+                );
                 println!();
 
                 if max_gpu_throughput > 3000.0 {
@@ -394,8 +437,14 @@ fn benchmark_zoda_optimal() {
             }
         }
 
-        println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║  Benchmark Complete                                              ║");
-        println!("╚══════════════════════════════════════════════════════════════════╝\n");
+        println!(
+            "\n╔══════════════════════════════════════════════════════════════════╗"
+        );
+        println!(
+            "║  Benchmark Complete                                              ║"
+        );
+        println!(
+            "╚══════════════════════════════════════════════════════════════════╝\n"
+        );
     }
 }

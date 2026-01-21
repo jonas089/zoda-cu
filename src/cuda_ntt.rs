@@ -20,6 +20,22 @@ extern "C" {
     fn cuda_free(d_ptr: *mut u64) -> CudaError;
     fn cuda_get_error_string(error: CudaError) -> *const c_char;
     fn cudaGetDeviceCount(count: *mut i32) -> CudaError;
+
+    // Batched NTT functions for maximum GPU throughput
+    pub fn cuda_ntt_batched(
+        d_values: *mut u64,
+        num_ntts: u32,
+        ntt_size: u32,
+        stride: u32,
+        omega: u64,
+    );
+    pub fn cuda_intt_batched(
+        d_values: *mut u64,
+        num_ntts: u32,
+        ntt_size: u32,
+        stride: u32,
+        omega: u64,
+    );
 }
 
 /// Check if CUDA is available
