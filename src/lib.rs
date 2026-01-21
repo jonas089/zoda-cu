@@ -19,7 +19,9 @@ struct FieldElem {
     w: u64,
 }
 
+#[cfg(target_os = "macos")]
 use ::metal::{Device, MTLResourceOptions, MTLSize};
+
 use num_bigint::BigUint;
 use rand::Rng;
 use std::{cmp::max, sync::Arc, time::Instant};
