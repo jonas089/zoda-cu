@@ -132,11 +132,6 @@ fn benchmark_gpu_vs_cpu() {
 
         println!("   CUDA available - GPU detected!\n");
 
-        // Part 1: Raw NTT Performance
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("Part 1: Raw NTT Performance (Forward Transform Only)");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-
         let ntt_sizes = vec![256, 512, 1024, 2048, 4096, 8192, 16384];
         let mut ntt_results = Vec::new();
 
@@ -145,20 +140,11 @@ fn benchmark_gpu_vs_cpu() {
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
             if let Some(result) = benchmark_ntt_size(size) {
-                println!(
-                    "CPU: {:>6}µs | GPU: {:>6}µs | Speedup: {:.2}x {}",
-                    result.cpu_ntt_us, result.gpu_ntt_us, result.speedup,
-                );
                 ntt_results.push(result);
             } else {
                 println!("FAILED");
             }
         }
-
-        // Part 2: Full ZODA Protocol
-        println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("Part 2: Full ZODA Protocol (Multiple NTT Operations)");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
         let zoda_sizes = vec![4, 8, 16, 32];
         let mut zoda_results = Vec::new();
@@ -168,10 +154,6 @@ fn benchmark_gpu_vs_cpu() {
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
             if let Some((cpu_us, gpu_us, speedup)) = benchmark_zoda_size(size) {
-                println!(
-                    "CPU: {:>6}µs | GPU: {:>6}µs | Speedup: {:.2}x {}",
-                    cpu_us, gpu_us, speedup,
-                );
                 zoda_results.push((size, cpu_us, gpu_us, speedup));
             } else {
                 println!("FAILED");
