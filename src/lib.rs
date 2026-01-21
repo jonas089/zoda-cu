@@ -1,5 +1,11 @@
 #![allow(unused)]
 mod ntt;
+pub mod babybear;
+pub mod ntt_babybear;
+pub mod zoda_babybear;
+
+#[cfg(feature = "cuda")]
+pub mod cuda_ntt;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -216,4 +222,48 @@ fn run_zoda_test_cpu(data_size: usize) -> std::time::Duration {
 fn test_zoda_impl_cpu() {
     let duration = run_zoda_test_cpu(4);
     println!("[CPU 4x4]: {:?}", duration);
+}
+
+#[test]
+fn test_compare_implementations() {
+    use crate::zoda_babybear::run_zoda_test_babybear;
+
+    println!("\n=== ZODA Performance Comparison ===\n");
+
+    // Test sizes
+    let sizes = vec![4, 8, 16, 32];
+
+    for size in sizes {
+        println!("Testing {}x{} data square:", size, size);
+
+        // Old BigInt implementation
+        let duration_bigint = run_zoda_test_cpu(size);
+        println!("  BigInt CPU:     {:?}", duration_bigint);
+
+        // BabyBear CPU implementation
+        let duration_bb_cpu = run_zoda_test_babybear(size, false);
+        println!("  BabyBear CPU:   {:?}", duration_bb_cpu);
+
+        let speedup = duration_bigint.as_secs_f64() / duration_bb_cpu.as_secs_f64();
+        println!("  CPU Speedup:    {:.2}x", speedup);
+
+        // BabyBear GPU implementation (if available)
+        #[cfg(feature = "cuda")]
+        {
+            use crate::cuda_ntt::cuda_available;
+            if cuda_available() {
+                let duration_bb_gpu = run_zoda_test_babybear(size, true);
+                println!("  BabyBear GPU:   {:?}", duration_bb_gpu);
+
+                let gpu_speedup_vs_bigint = duration_bigint.as_secs_f64() / duration_bb_gpu.as_secs_f64();
+                let gpu_speedup_vs_cpu = duration_bb_cpu.as_secs_f64() / duration_bb_gpu.as_secs_f64();
+                println!("  GPU Speedup vs BigInt: {:.2}x", gpu_speedup_vs_bigint);
+                println!("  GPU Speedup vs CPU:    {:.2}x", gpu_speedup_vs_cpu);
+            } else {
+                println!("  BabyBear GPU:   Not available");
+            }
+        }
+
+        println!();
+    }
 }

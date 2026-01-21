@@ -1,0 +1,246 @@
+// ZODA implementation using BabyBear field with GPU acceleration
+
+use crate::babybear::BabyBear;
+use crate::ntt_babybear::{intt, ntt, roots_of_unity_domain};
+use rand::Rng;
+use sha2::{Digest, Sha256};
+use std::cmp::max;
+
+#[cfg(feature = "cuda")]
+use crate::cuda_ntt::{cuda_available, intt_cuda, ntt_cuda};
+
+/// Data cell in the square
+#[derive(Clone)]
+pub struct BabyBearCell {
+    pub value: BabyBear,
+    pub column: usize,
+    pub row: usize,
+}
+
+/// Data square for ZODA protocol
+pub struct BabyBearDataSquare {
+    pub cells: Vec<BabyBearCell>,
+    pub columns: usize,
+    pub rows: usize,
+}
+
+impl BabyBearDataSquare {
+    pub fn new(cells: Vec<BabyBearCell>, columns: usize, rows: usize) -> Self {
+        Self {
+            cells,
+            columns,
+            rows,
+        }
+    }
+
+    pub fn get_cell(&self, column: usize, row: usize) -> Option<&BabyBearCell> {
+        self.cells
+            .iter()
+            .find(|cell| cell.column == column && cell.row == row)
+    }
+
+    pub fn set_cell(&mut self, column: usize, row: usize, value: BabyBear) {
+        if let Some(cell) = self
+            .cells
+            .iter_mut()
+            .find(|c| c.column == column && c.row == row)
+        {
+            cell.value = value;
+        } else {
+            self.cells.push(BabyBearCell { value, column, row });
+        }
+        self.rows = max(self.rows, row + 1);
+        self.columns = max(self.columns, column + 1);
+    }
+
+    pub fn get_row(&self, row: usize) -> Vec<BabyBear> {
+        let mut row_cells: Vec<_> = self.cells.iter().filter(|cell| cell.row == row).collect();
+        row_cells.sort_by_key(|c| c.column);
+        row_cells.into_iter().map(|c| c.value).collect()
+    }
+
+    pub fn get_column(&self, column: usize) -> Vec<BabyBear> {
+        let mut col_cells: Vec<_> = self
+            .cells
+            .iter()
+            .filter(|cell| cell.column == column)
+            .collect();
+        col_cells.sort_by_key(|c| c.row);
+        col_cells.into_iter().map(|c| c.value).collect()
+    }
+
+    pub fn hash_root(&self) -> String {
+        let mut hasher = Sha256::new();
+        let all_bytes: Vec<u8> = self
+            .cells
+            .iter()
+            .flat_map(|cell| cell.value.to_bytes())
+            .collect();
+        hasher.update(&all_bytes);
+        format!("{:x}", hasher.finalize())
+    }
+}
+
+/// Polynomial using BabyBear field
+pub struct BabyBearPolynomial {
+    pub coeffs: Vec<BabyBear>,
+}
+
+impl BabyBearPolynomial {
+    pub fn from_coeffs(coeffs: Vec<BabyBear>) -> Self {
+        Self { coeffs }
+    }
+}
+
+/// Run ZODA test with BabyBear field
+/// Use GPU acceleration if available
+pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Duration {
+    use std::time::Instant;
+    let start_time = Instant::now();
+
+    #[cfg(feature = "cuda")]
+    let gpu_available = use_gpu && cuda_available();
+    #[cfg(not(feature = "cuda"))]
+    let gpu_available = false;
+
+    if use_gpu && !gpu_available {
+        println!("Warning: GPU requested but not available, falling back to CPU");
+    }
+
+    // Build data square
+    let mut data_square = BabyBearDataSquare::new(vec![], 0, 0);
+    for col in 0..data_size {
+        for row in 0..data_size {
+            let value = rand::rng().random_range(1..256);
+            data_square.set_cell(col, row, BabyBear::new(value));
+        }
+    }
+
+    // NTT domain (power-of-two)
+    let ntt_n = data_square.rows.next_power_of_two();
+    let omega = BabyBear::get_root_of_unity(ntt_n.trailing_zeros());
+
+    // Column polynomials
+    let mut column_polys = Vec::new();
+    for column_idx in 0..data_square.columns {
+        let mut evals = data_square.get_column(column_idx);
+        evals.resize(ntt_n, BabyBear::zero());
+
+        // INTT to get coefficients
+        let mut coeffs = evals;
+        if gpu_available {
+            #[cfg(feature = "cuda")]
+            intt_cuda(&mut coeffs).expect("CUDA INTT failed");
+        } else {
+            intt(&mut coeffs, omega);
+        }
+
+        column_polys.push(BabyBearPolynomial::from_coeffs(coeffs));
+    }
+
+    // Encode columns by evaluating at extended domain
+    let mut extended_data_square = BabyBearDataSquare::new(vec![], 0, 0);
+    for (col_idx, column_poly) in column_polys.into_iter().enumerate() {
+        let mut evals = column_poly.coeffs.clone();
+
+        // NTT to get evaluations
+        if gpu_available {
+            #[cfg(feature = "cuda")]
+            ntt_cuda(&mut evals).expect("CUDA NTT failed");
+        } else {
+            ntt(&mut evals, omega);
+        }
+
+        for (i, y) in evals.into_iter().enumerate() {
+            extended_data_square.set_cell(col_idx, i, y);
+        }
+    }
+
+    let encoded_data_square_root = extended_data_square.hash_root();
+
+    // Generate deterministic coefficients
+    let mut deterministic_coefficients: Vec<BabyBear> = (0..extended_data_square.rows)
+        .map(|i| {
+            let mut hasher = Sha256::new();
+            hasher.update(encoded_data_square_root.as_bytes());
+            hasher.update(&i.to_le_bytes());
+            let digest = hasher.finalize();
+            let val = u64::from_be_bytes([
+                digest[0], digest[1], digest[2], digest[3],
+                digest[4], digest[5], digest[6], digest[7],
+            ]);
+            BabyBear::new(val)
+        })
+        .collect();
+
+    for i in 0..deterministic_coefficients.len() {
+        deterministic_coefficients[i] =
+            deterministic_coefficients[i] + BabyBear::new(i as u64);
+    }
+
+    // Compute row linear combinations
+    let mut y: Vec<BabyBear> = Vec::new();
+    for row_idx in 0..data_square.rows {
+        let row_data = extended_data_square.get_row(row_idx);
+        let mut running_sum = BabyBear::zero();
+        for (x, coeff) in row_data.iter().zip(deterministic_coefficients.iter()) {
+            running_sum = running_sum + (*x * *coeff);
+        }
+        y.push(running_sum);
+    }
+
+    // Interpolate y
+    let mut y_coeffs = y.clone();
+    y_coeffs.resize(ntt_n, BabyBear::zero());
+    if gpu_available {
+        #[cfg(feature = "cuda")]
+        intt_cuda(&mut y_coeffs).expect("CUDA INTT failed");
+    } else {
+        intt(&mut y_coeffs, omega);
+    }
+
+    // Evaluate y over extended domain
+    let mut y_encoded = y_coeffs.clone();
+    if gpu_available {
+        #[cfg(feature = "cuda")]
+        ntt_cuda(&mut y_encoded).expect("CUDA NTT failed");
+    } else {
+        ntt(&mut y_encoded, omega);
+    }
+
+    // Simulate sampling
+    for _ in 0..64 {
+        let random_row = rand::rng().random_range(0..extended_data_square.rows);
+        let row_data = extended_data_square.get_row(random_row);
+        let mut running_sum = BabyBear::zero();
+        for (x, coeff) in row_data.iter().zip(deterministic_coefficients.iter()) {
+            running_sum = running_sum + (*x * *coeff);
+        }
+
+        assert_eq!(running_sum.value, y_encoded[random_row].value);
+    }
+
+    start_time.elapsed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zoda_babybear_cpu() {
+        let duration = run_zoda_test_babybear(4, false);
+        println!("[BabyBear CPU 4x4]: {:?}", duration);
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_zoda_babybear_gpu() {
+        if !cuda_available() {
+            println!("CUDA not available, skipping GPU test");
+            return;
+        }
+        let duration = run_zoda_test_babybear(4, true);
+        println!("[BabyBear GPU 4x4]: {:?}", duration);
+    }
+}
