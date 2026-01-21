@@ -13,6 +13,12 @@ mod benchmark;
 #[cfg(test)]
 mod benchmark_zoda;
 
+#[cfg(test)]
+mod benchmark_zoda_batched;
+
+#[cfg(test)]
+mod benchmark_zoda_optimal;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FieldElem {

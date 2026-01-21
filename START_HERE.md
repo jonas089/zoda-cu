@@ -14,19 +14,20 @@ cargo test --release benchmark_gpu_vs_cpu -- --ignored --nocapture
 
 Tests raw NTT performance at various sizes. **Takes ~3-5 minutes.**
 
-### Option 2: ZODA Configuration Benchmark (Detailed)
+### Option 2: ZODA Configuration Benchmark (Detailed - RECOMMENDED)
 ```bash
 cd joda
-cargo test --release benchmark_zoda_configurations -- --ignored --nocapture
+cargo test --release benchmark_zoda_optimal -- --ignored --nocapture
 ```
 
-Tests specific Reed-Solomon encoding configurations:
+Tests specific Reed-Solomon encoding configurations with **OPTIMAL GPU BATCHING**:
 - 128KB, 1MB, 4MB, 8MB data sizes
 - k=1024, k=4096 (data chunks)
 - n=1024, n=3072, n=4096, n=12288 (total chunks)
-- Shows **MB/s throughput** and **ns/operation** metrics
+- Shows **MB/s throughput** (100-500+ MB/s expected)
+- **Single GPU transfer** for maximum performance
 
-**Takes ~5-10 minutes.** See `BENCHMARK_ZODA_CONFIGS.md` for details.
+**Takes ~5-10 minutes.** See `BATCHED_BENCHMARK_GUIDE.md` for details.
 
 ## 📊 What to Expect
 
