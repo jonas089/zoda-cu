@@ -7,6 +7,9 @@ pub mod zoda_babybear;
 #[cfg(feature = "cuda")]
 pub mod cuda_ntt;
 
+#[cfg(test)]
+mod benchmark;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FieldElem {

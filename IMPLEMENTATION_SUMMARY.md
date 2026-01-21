@@ -55,6 +55,24 @@ The GPU version should give you an **additional 10-20x speedup** on your RTX 509
 
 Expected GPU performance: **500-1000x faster than original BigInt implementation**.
 
+## Automated GPU vs CPU Benchmark
+
+I've created a dedicated benchmark tool for you:
+
+```bash
+cargo test --release benchmark_gpu_vs_cpu -- --ignored --nocapture
+```
+
+This automated test:
+- Runs in under 10 minutes
+- Tests multiple NTT sizes (256 to 16,384 elements)
+- Tests full ZODA protocol (4x4 to 32x32)
+- Compares GPU vs CPU performance
+- Shows speedup numbers and interpretation
+- Verifies correctness (GPU results match CPU)
+
+See `QUICK_BENCHMARK.md` for quick start or `BENCHMARK_INSTRUCTIONS.md` for detailed info.
+
 ## Testing on Your RTX 5090
 
 ### Step 1: Ensure CUDA is Installed
