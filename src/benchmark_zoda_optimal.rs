@@ -223,29 +223,38 @@ fn benchmark_zoda_optimal() {
         println!("NOTE: This uses SINGLE GPU TRANSFER for maximum performance.\n");
 
         let configs = vec![
-            // 128KB
+            // 128KB - small baseline
             BenchmarkConfig { data_size_kb: 128, k: 1024, n: 1024 },
-            BenchmarkConfig { data_size_kb: 128, k: 1024, n: 3072 },
             BenchmarkConfig { data_size_kb: 128, k: 4096, n: 4096 },
-            BenchmarkConfig { data_size_kb: 128, k: 4096, n: 12288 },
 
             // 1MB
             BenchmarkConfig { data_size_kb: 1024, k: 1024, n: 1024 },
-            BenchmarkConfig { data_size_kb: 1024, k: 1024, n: 3072 },
             BenchmarkConfig { data_size_kb: 1024, k: 4096, n: 4096 },
-            BenchmarkConfig { data_size_kb: 1024, k: 4096, n: 12288 },
 
-            // 4MB
-            BenchmarkConfig { data_size_kb: 4096, k: 1024, n: 1024 },
-            BenchmarkConfig { data_size_kb: 4096, k: 1024, n: 3072 },
-            BenchmarkConfig { data_size_kb: 4096, k: 4096, n: 4096 },
-            BenchmarkConfig { data_size_kb: 4096, k: 4096, n: 12288 },
+            // 4MB (chunk_size = 4096KB*1024/k, must be <= n)
+            BenchmarkConfig { data_size_kb: 4096, k: 1024, n: 4096 },   // chunk=4096, ntt=4096 ✓
+            BenchmarkConfig { data_size_kb: 4096, k: 4096, n: 4096 },   // chunk=1024, ntt=4096 ✓
 
             // 8MB
-            BenchmarkConfig { data_size_kb: 8192, k: 1024, n: 1024 },
-            BenchmarkConfig { data_size_kb: 8192, k: 1024, n: 3072 },
-            BenchmarkConfig { data_size_kb: 8192, k: 4096, n: 4096 },
-            BenchmarkConfig { data_size_kb: 8192, k: 4096, n: 12288 },
+            BenchmarkConfig { data_size_kb: 8192, k: 1024, n: 8192 },   // chunk=8192, ntt=8192 ✓
+            BenchmarkConfig { data_size_kb: 8192, k: 4096, n: 4096 },   // chunk=2048, ntt=4096 ✓
+
+            // 16MB - GPU starts to shine here
+            BenchmarkConfig { data_size_kb: 16384, k: 1024, n: 16384 }, // chunk=16384, ntt=16384 ✓
+            BenchmarkConfig { data_size_kb: 16384, k: 4096, n: 4096 },  // chunk=4096, ntt=4096 ✓
+
+            // 32MB - large data, good GPU utilization
+            BenchmarkConfig { data_size_kb: 32768, k: 2048, n: 16384 }, // chunk=16384, ntt=16384 ✓
+            BenchmarkConfig { data_size_kb: 32768, k: 4096, n: 8192 },  // chunk=8192, ntt=8192 ✓
+            BenchmarkConfig { data_size_kb: 32768, k: 8192, n: 4096 },  // chunk=4096, ntt=4096 ✓
+
+            // 64MB - GPU should dominate
+            BenchmarkConfig { data_size_kb: 65536, k: 4096, n: 16384 }, // chunk=16384, ntt=16384 ✓
+            BenchmarkConfig { data_size_kb: 65536, k: 8192, n: 8192 },  // chunk=8192, ntt=8192 ✓
+
+            // 128MB - maximum GPU advantage
+            BenchmarkConfig { data_size_kb: 131072, k: 8192, n: 16384 }, // chunk=16384, ntt=16384 ✓
+            BenchmarkConfig { data_size_kb: 131072, k: 16384, n: 8192 }, // chunk=8192, ntt=8192 ✓
         ];
 
         let mut results = Vec::new();
