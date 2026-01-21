@@ -4,19 +4,29 @@
 
 I've implemented CUDA-accelerated ZODA with the BabyBear field. Everything is ready to test on your RTX 3060 mobile (or RTX 5090).
 
-## ⚡ Run the Benchmark (One Command)
+## ⚡ Run the Benchmarks
 
+### Option 1: General GPU vs CPU Benchmark (Quick)
 ```bash
 cd joda
 cargo test --release benchmark_gpu_vs_cpu -- --ignored --nocapture
 ```
 
-**That's it!** This single command will:
-- Build the project with CUDA support
-- Run comprehensive GPU vs CPU tests
-- Show you speedup numbers
-- Verify correctness
-- Complete in under 10 minutes
+Tests raw NTT performance at various sizes. **Takes ~3-5 minutes.**
+
+### Option 2: ZODA Configuration Benchmark (Detailed)
+```bash
+cd joda
+cargo test --release benchmark_zoda_configurations -- --ignored --nocapture
+```
+
+Tests specific Reed-Solomon encoding configurations:
+- 128KB, 1MB, 4MB, 8MB data sizes
+- k=1024, k=4096 (data chunks)
+- n=1024, n=3072, n=4096, n=12288 (total chunks)
+- Shows **MB/s throughput** and **ns/operation** metrics
+
+**Takes ~5-10 minutes.** See `BENCHMARK_ZODA_CONFIGS.md` for details.
 
 ## 📊 What to Expect
 
@@ -43,6 +53,23 @@ ZODA Protocol Average Speedup: 10-18x
 ```
 
 ## 🚨 If Something Goes Wrong
+
+### "extern functions can't be found" or linking errors
+
+Run the diagnostic script:
+```bash
+./check_cuda.sh
+```
+
+This will tell you exactly what's missing. Then:
+```bash
+# Follow the recommended exports from check_cuda.sh
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+export PATH=/usr/local/cuda/bin:$PATH
+cargo clean && cargo build --release
+```
+
+**See `TROUBLESHOOT_LINKING.md` for detailed linking fixes.**
 
 ### "CUDA not available"
 ```bash

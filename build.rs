@@ -75,20 +75,36 @@ fn main() {
         panic!("Failed to create static library");
     }
 
+    // Find CUDA library directory
+    let cuda_lib_paths = if let Ok(cuda_path) = env::var("CUDA_PATH") {
+        vec![
+            format!("{}/lib64", cuda_path),
+            format!("{}/lib", cuda_path),
+        ]
+    } else {
+        vec![
+            "/usr/local/cuda/lib64".to_string(),
+            "/usr/local/cuda/lib".to_string(),
+            "/usr/lib/x86_64-linux-gnu".to_string(),
+            "/usr/lib64".to_string(),
+            "/opt/cuda/lib64".to_string(),
+            "/opt/cuda/lib".to_string(),
+            "/usr/lib/wsl/lib".to_string(), // WSL2
+        ]
+    };
+
     // Tell cargo to link the CUDA runtime and our library
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=ntt_cuda");
-    println!("cargo:rustc-link-lib=dylib=cudart");
 
-    // Add CUDA library path
-    if let Ok(cuda_path) = env::var("CUDA_PATH") {
-        println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
-    } else {
-        // Common CUDA paths
-        println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
-        println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu");
-        println!("cargo:rustc-link-search=native=/opt/cuda/lib64");
+    // Add all CUDA library paths
+    for path in &cuda_lib_paths {
+        println!("cargo:rustc-link-search=native={}", path);
     }
 
+    // Try to link cudart dynamically first, fall back to static if needed
+    println!("cargo:rustc-link-lib=dylib=cudart");
+
     println!("cargo:rustc-cfg=feature=\"cuda\"");
+    println!("cargo:warning=CUDA support enabled");
 }

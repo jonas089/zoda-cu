@@ -2,16 +2,24 @@
 
 GPU-accelerated implementation of the ZODA (Zero Overhead Data Availability) protocol using CUDA and the BabyBear finite field.
 
-## 🚀 Quick Start - Run the Benchmark
+## 🚀 Quick Start - Run Benchmarks
 
 On your GPU machine (RTX 3060 mobile, RTX 5090, or any CUDA-capable GPU):
 
+### General Performance Benchmark
 ```bash
 cd joda
 cargo test --release benchmark_gpu_vs_cpu -- --ignored --nocapture
 ```
+Tests raw NTT performance. **Completes in ~3-5 minutes.**
 
-This runs an automated benchmark comparing GPU vs CPU performance. **Completes in under 10 minutes.**
+### ZODA Configuration Benchmark (Recommended)
+```bash
+cd joda
+cargo test --release benchmark_zoda_configurations -- --ignored --nocapture
+```
+Tests specific Reed-Solomon configurations (128KB to 8MB, various k/n values).
+Shows **MB/s** and **ns/operation** metrics. **Completes in ~5-10 minutes.**
 
 ## 📊 Performance
 

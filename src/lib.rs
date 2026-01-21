@@ -10,6 +10,9 @@ pub mod cuda_ntt;
 #[cfg(test)]
 mod benchmark;
 
+#[cfg(test)]
+mod benchmark_zoda;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FieldElem {
