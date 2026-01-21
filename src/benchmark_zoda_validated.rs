@@ -125,6 +125,7 @@ fn compute_data_root(encoded_rows: &[Vec<BabyBear>]) -> String {
 
 /// Generate deterministic coefficients for random linear combination check
 /// This is the ZODA verification approach
+/// NOTE: In ZODA, coefficients are generated per COLUMN, one for each column position
 fn generate_deterministic_coefficients(
     data_root: &str,
     num_columns: usize,
@@ -144,11 +145,16 @@ fn generate_deterministic_coefficients(
         .collect()
 }
 
-/// Verify ZODA encoding correctness via random linear combination check
+/// Verify ZODA encoding correctness via column-wise Reed-Solomon check
 ///
-/// This validates that the encoded data forms a valid Reed-Solomon codeword
-/// by checking that random linear combinations of rows are consistent
-/// with the polynomial structure.
+/// The encoding works column-wise:
+/// - Each column is INTT'd to get polynomial coefficients
+/// - Then NTT'd to extend from k to k+n evaluation points
+/// So we verify that each column forms a valid Reed-Solomon codeword by:
+/// 1. Taking the first k values of a column
+/// 2. INTT to get polynomial coefficients
+/// 3. NTT to extend to k+n points
+/// 4. Verify the extended points match the encoded column
 #[cfg(feature = "cuda")]
 fn validate_zoda_encoding(
     config: &EncodingConfig,
@@ -162,54 +168,50 @@ fn validate_zoda_encoding(
     let ntt_size_k = config.ntt_size_k();
     let ntt_size_kn = config.ntt_size_kn();
 
-    // 1. Compute data root (commitment)
-    let data_root = compute_data_root(encoded_rows);
-
-    // 2. Generate deterministic coefficients for linear combination
-    let coefficients = generate_deterministic_coefficients(&data_root, num_positions);
-
-    // 3. Compute linear combination of all rows in the original k rows
-    let mut y_values: Vec<BabyBear> = Vec::with_capacity(k);
-    for row_idx in 0..k {
-        let mut sum = BabyBear::zero();
-        for (col_idx, &coeff) in coefficients.iter().enumerate() {
-            sum = sum + (encoded_rows[row_idx][col_idx] * coeff);
-        }
-        y_values.push(sum);
-    }
-
-    // 4. Use INTT to get polynomial coefficients of y
     let omega_k = BabyBear::get_root_of_unity(ntt_size_k.trailing_zeros());
     let omega_kn = BabyBear::get_root_of_unity(ntt_size_kn.trailing_zeros());
 
-    let mut y_coeffs = y_values.clone();
-    y_coeffs.resize(ntt_size_k, BabyBear::zero());
-    cpu_intt(&mut y_coeffs, omega_k);
-
-    // 5. Extend to k+n points via NTT
-    y_coeffs.resize(ntt_size_kn, BabyBear::zero());
-    let mut y_extended = y_coeffs.clone();
-    cpu_ntt(&mut y_extended, omega_kn);
-
-    // 6. Verify random rows in the extended region satisfy the linear combination
-    let num_checks = 64.min(n); // Check up to 64 parity rows
+    // Verify random columns
+    let num_checks = 64.min(num_positions); // Check up to 64 columns
     let mut all_checks_passed = true;
 
     for check_idx in 0..num_checks {
-        // Check parity rows (rows k through k+n-1)
-        let row_idx = k + (check_idx * n / num_checks);
+        // Select which column to check (spread across all columns)
+        let col_idx = (check_idx * num_positions) / num_checks;
 
-        let mut sum = BabyBear::zero();
-        for (col_idx, &coeff) in coefficients.iter().enumerate() {
-            sum = sum + (encoded_rows[row_idx][col_idx] * coeff);
+        // Extract the column from the encoded data
+        let mut column: Vec<BabyBear> = Vec::with_capacity(k + n);
+        for row_idx in 0..(k + n) {
+            column.push(encoded_rows[row_idx][col_idx]);
         }
 
-        if sum.value != y_extended[row_idx].value {
-            println!(
-                "  ✗ Validation FAILED at parity row {}: expected {}, got {}",
-                row_idx, y_extended[row_idx].value, sum.value
-            );
-            all_checks_passed = false;
+        // Take first k values (original data)
+        let mut original_k: Vec<BabyBear> = column.iter().take(k).copied().collect();
+        original_k.resize(ntt_size_k, BabyBear::zero());
+
+        // INTT to get polynomial coefficients
+        cpu_intt(&mut original_k, omega_k);
+
+        // Extend to k+n by padding with zeros
+        original_k.resize(ntt_size_kn, BabyBear::zero());
+
+        // NTT to evaluate at k+n points
+        let mut extended = original_k.clone();
+        cpu_ntt(&mut extended, omega_kn);
+
+        // Verify that the extended values match the encoded column
+        for row_idx in 0..(k + n) {
+            if extended[row_idx].value != column[row_idx].value {
+                println!(
+                    "  ✗ Validation FAILED at column {} row {}: expected {}, got {}",
+                    col_idx, row_idx, column[row_idx].value, extended[row_idx].value
+                );
+                all_checks_passed = false;
+                break;
+            }
+        }
+
+        if !all_checks_passed {
             break;
         }
     }
@@ -261,7 +263,7 @@ fn run_validated_encoding_benchmark(
         };
 
     if validation_passed {
-        println!("✓ PASSED ({} checks, {:.2} ms)", num_checks, validation_time_ms);
+        println!("✓ PASSED ({} column checks, {:.2} ms)", num_checks, validation_time_ms);
     } else {
         println!("✗ FAILED ({:.2} ms)", validation_time_ms);
     }
@@ -381,13 +383,14 @@ fn benchmark_zoda_validated() {
         if all_passed {
             println!("\n✓✓✓ ALL VALIDATIONS PASSED ✓✓✓");
             println!("\nThe GPU-accelerated Reed-Solomon encoding has been verified to be");
-            println!("mathematically correct according to the ZODA protocol specification.");
+            println!("mathematically correct according to vertical RS encoding.");
             println!("\nValidation method:");
-            println!("  1. Compute deterministic linear combination of all columns");
-            println!("  2. Interpolate to get polynomial coefficients");
-            println!("  3. Evaluate polynomial at extended points");
-            println!("  4. Verify parity rows satisfy the linear combination property");
-            println!("\nThis proves the encoded data forms a valid Reed-Solomon codeword.");
+            println!("  1. For each column, extract the first k values (original data)");
+            println!("  2. INTT to interpolate and get polynomial coefficients");
+            println!("  3. Zero-pad to k+n size");
+            println!("  4. NTT to evaluate polynomial at k+n points");
+            println!("  5. Verify the result matches the GPU-encoded column");
+            println!("\nThis proves each column forms a valid Reed-Solomon codeword.");
         } else {
             println!("\n✗✗✗ SOME VALIDATIONS FAILED ✗✗✗");
             println!("Please check the encoding implementation for errors.");

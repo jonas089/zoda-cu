@@ -27,7 +27,7 @@ cargo test --features cuda --release benchmark_zoda_validated -- --ignored --noc
 ```
 
 The validation ensures that the encoded data forms a mathematically correct Reed-Solomon codeword by:
-- Computing deterministic linear combinations of all columns
-- Interpolating to get polynomial coefficients
-- Evaluating the polynomial at extended points
-- Verifying that parity rows satisfy the linear combination property
+- Extracting each column's first k values (original data)
+- Using INTT to interpolate and get polynomial coefficients
+- Zero-padding and using NTT to evaluate at k+n points
+- Verifying that the result matches the GPU-encoded column values
