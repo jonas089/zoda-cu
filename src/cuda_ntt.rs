@@ -193,7 +193,7 @@ mod tests {
             return;
         }
 
-        let n = 256;
+        let n = 256usize;
         let mut cpu_values: Vec<BabyBear> = (0..n)
             .map(|i| BabyBear::new((i * 7 + 3) as u64))
             .collect();
@@ -224,7 +224,7 @@ mod tests {
             return;
         }
 
-        let n = 256;
+        let n = 256usize;
         let original: Vec<BabyBear> = (0..n)
             .map(|i| BabyBear::new((i * 7 + 3) as u64))
             .collect();
