@@ -246,7 +246,11 @@ mod tests {
             let omega = BabyBear::get_root_of_unity(log_n);
             let n = 1u64 << log_n;
             let result = omega.pow(n);
-            assert_eq!(result.value, 1, "omega^n should equal 1 for log_n={}", log_n);
+            assert_eq!(
+                result.value, 1,
+                "omega^n should equal 1 for log_n={}",
+                log_n
+            );
         }
     }
 

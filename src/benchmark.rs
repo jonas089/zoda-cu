@@ -112,10 +112,6 @@ fn benchmark_zoda_size(size: usize) -> Option<(u128, u128, f64)> {
 #[test]
 #[ignore] // Use --ignored to run this benchmark
 fn benchmark_gpu_vs_cpu() {
-    println!("\n╔═══════════════════════════════════════════════════════════╗");
-    println!("║       GPU vs CPU Benchmark - ZODA Protocol                ║");
-    println!("╚═══════════════════════════════════════════════════════════╝\n");
-
     #[cfg(not(feature = "cuda"))]
     {
         println!("   CUDA support not compiled in.");

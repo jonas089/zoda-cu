@@ -1,6 +1,3 @@
-// ZODA-specific benchmark with Reed-Solomon parameters
-// Tests specific (data_size, k, n) configurations
-
 use crate::babybear::BabyBear;
 use crate::ntt_babybear::{intt as cpu_intt, ntt as cpu_ntt};
 use std::time::Instant;
@@ -10,9 +7,9 @@ use crate::cuda_ntt::{cuda_available, intt_cuda, ntt_cuda};
 
 #[derive(Debug)]
 struct BenchmarkConfig {
-    data_size_kb: usize,  // Data size in KB
-    k: usize,             // Number of data chunks
-    n: usize,             // Total chunks (data + parity)
+    data_size_kb: usize,
+    k: usize,
+    n: usize,
 }
 
 #[derive(Debug)]
@@ -166,13 +163,9 @@ fn run_benchmark_config(config: BenchmarkConfig) -> Option<BenchmarkResult> {
 #[test]
 #[ignore]
 fn benchmark_zoda_configurations() {
-    println!("\n╔════════════════════════════════════════════════════════════╗");
-    println!("║     ZODA Benchmark - Specific Configurations              ║");
-    println!("╚════════════════════════════════════════════════════════════╝\n");
-
     #[cfg(not(feature = "cuda"))]
     {
-        println!("❌ CUDA support not compiled in.");
+        println!("   CUDA support not compiled in.");
         println!("   Build with: cargo build --release");
         return;
     }
@@ -180,64 +173,118 @@ fn benchmark_zoda_configurations() {
     #[cfg(feature = "cuda")]
     {
         if !cuda_available() {
-            println!("❌ CUDA not available on this system.");
+            println!("   CUDA not available on this system.");
             return;
         }
 
-        println!("✅ CUDA available - GPU detected!\n");
+        println!("   CUDA available - GPU detected!\n");
 
         // Define all test configurations
         let configs = vec![
             // 128KB
-            BenchmarkConfig { data_size_kb: 128, k: 1024, n: 1024 },
-            BenchmarkConfig { data_size_kb: 128, k: 1024, n: 3072 },
-            BenchmarkConfig { data_size_kb: 128, k: 4096, n: 4096 },
-            BenchmarkConfig { data_size_kb: 128, k: 4096, n: 12288 },
-
+            BenchmarkConfig {
+                data_size_kb: 128,
+                k: 1024,
+                n: 1024,
+            },
+            BenchmarkConfig {
+                data_size_kb: 128,
+                k: 1024,
+                n: 3072,
+            },
+            BenchmarkConfig {
+                data_size_kb: 128,
+                k: 4096,
+                n: 4096,
+            },
+            BenchmarkConfig {
+                data_size_kb: 128,
+                k: 4096,
+                n: 12288,
+            },
             // 1MB
-            BenchmarkConfig { data_size_kb: 1024, k: 1024, n: 1024 },
-            BenchmarkConfig { data_size_kb: 1024, k: 1024, n: 3072 },
-            BenchmarkConfig { data_size_kb: 1024, k: 4096, n: 4096 },
-            BenchmarkConfig { data_size_kb: 1024, k: 4096, n: 12288 },
-
+            BenchmarkConfig {
+                data_size_kb: 1024,
+                k: 1024,
+                n: 1024,
+            },
+            BenchmarkConfig {
+                data_size_kb: 1024,
+                k: 1024,
+                n: 3072,
+            },
+            BenchmarkConfig {
+                data_size_kb: 1024,
+                k: 4096,
+                n: 4096,
+            },
+            BenchmarkConfig {
+                data_size_kb: 1024,
+                k: 4096,
+                n: 12288,
+            },
             // 4MB
-            BenchmarkConfig { data_size_kb: 4096, k: 1024, n: 1024 },
-            BenchmarkConfig { data_size_kb: 4096, k: 1024, n: 3072 },
-            BenchmarkConfig { data_size_kb: 4096, k: 4096, n: 4096 },
-            BenchmarkConfig { data_size_kb: 4096, k: 4096, n: 12288 },
-
+            BenchmarkConfig {
+                data_size_kb: 4096,
+                k: 1024,
+                n: 1024,
+            },
+            BenchmarkConfig {
+                data_size_kb: 4096,
+                k: 1024,
+                n: 3072,
+            },
+            BenchmarkConfig {
+                data_size_kb: 4096,
+                k: 4096,
+                n: 4096,
+            },
+            BenchmarkConfig {
+                data_size_kb: 4096,
+                k: 4096,
+                n: 12288,
+            },
             // 8MB
-            BenchmarkConfig { data_size_kb: 8192, k: 1024, n: 1024 },
-            BenchmarkConfig { data_size_kb: 8192, k: 1024, n: 3072 },
-            BenchmarkConfig { data_size_kb: 8192, k: 4096, n: 4096 },
-            BenchmarkConfig { data_size_kb: 8192, k: 4096, n: 12288 },
+            BenchmarkConfig {
+                data_size_kb: 8192,
+                k: 1024,
+                n: 1024,
+            },
+            BenchmarkConfig {
+                data_size_kb: 8192,
+                k: 1024,
+                n: 3072,
+            },
+            BenchmarkConfig {
+                data_size_kb: 8192,
+                k: 4096,
+                n: 4096,
+            },
+            BenchmarkConfig {
+                data_size_kb: 8192,
+                k: 4096,
+                n: 12288,
+            },
         ];
 
         let mut results = Vec::new();
 
         for config in configs {
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            println!("Configuration: {}KB, k={}, n={}",
-                config.data_size_kb, config.k, config.n);
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
             if let Some(result) = run_benchmark_config(config) {
                 results.push(result);
             }
             println!();
         }
 
-        // Print summary table
-        println!("\n╔════════════════════════════════════════════════════════════╗");
-        println!("║                    Results Summary                         ║");
-        println!("╚════════════════════════════════════════════════════════════╝\n");
-
-        println!("{:<8} {:<6} {:<6} │ {:<12} {:<12} │ {:<12} {:<12} │ {:<8}",
-            "Size", "k", "n", "CPU MB/s", "GPU MB/s", "CPU ns/op", "GPU ns/op", "Speedup");
+        println!(
+            "{:<8} {:<6} {:<6} │ {:<12} {:<12} │ {:<12} {:<12} │ {:<8}",
+            "Size", "k", "n", "CPU MB/s", "GPU MB/s", "CPU ns/op", "GPU ns/op", "Speedup"
+        );
         println!("{}", "─".repeat(120));
 
         for result in &results {
-            println!("{:<8} {:<6} {:<6} │ {:<12.2} {:<12.2} │ {:<12.1} {:<12.1} │ {:<8.2}x",
+            println!(
+                "{:<8} {:<6} {:<6} │ {:<12.2} {:<12.2} │ {:<12.1} {:<12.1} │ {:<8.2}x",
                 format!("{}KB", result.config.data_size_kb),
                 result.config.k,
                 result.config.n,
@@ -249,17 +296,21 @@ fn benchmark_zoda_configurations() {
             );
         }
 
-        println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("Summary Statistics");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-
         if !results.is_empty() {
-            let avg_speedup: f64 = results.iter().map(|r| r.speedup).sum::<f64>() / results.len() as f64;
+            let avg_speedup: f64 =
+                results.iter().map(|r| r.speedup).sum::<f64>() / results.len() as f64;
             let max_speedup = results.iter().map(|r| r.speedup).fold(0.0f64, f64::max);
-            let min_speedup = results.iter().map(|r| r.speedup).fold(f64::INFINITY, f64::min);
+            let min_speedup = results
+                .iter()
+                .map(|r| r.speedup)
+                .fold(f64::INFINITY, f64::min);
 
-            let avg_gpu_throughput: f64 = results.iter().map(|r| r.gpu_throughput_mbs).sum::<f64>() / results.len() as f64;
-            let max_gpu_throughput = results.iter().map(|r| r.gpu_throughput_mbs).fold(0.0f64, f64::max);
+            let avg_gpu_throughput: f64 =
+                results.iter().map(|r| r.gpu_throughput_mbs).sum::<f64>() / results.len() as f64;
+            let max_gpu_throughput = results
+                .iter()
+                .map(|r| r.gpu_throughput_mbs)
+                .fold(0.0f64, f64::max);
 
             println!("Average GPU Speedup:     {:.2}x", avg_speedup);
             println!("Best GPU Speedup:        {:.2}x", max_speedup);
@@ -268,9 +319,5 @@ fn benchmark_zoda_configurations() {
             println!("Average GPU Throughput:  {:.2} MB/s", avg_gpu_throughput);
             println!("Peak GPU Throughput:     {:.2} MB/s", max_gpu_throughput);
         }
-
-        println!("\n╔════════════════════════════════════════════════════════════╗");
-        println!("║  Benchmark Complete! ✅                                    ║");
-        println!("╚════════════════════════════════════════════════════════════╝\n");
     }
 }

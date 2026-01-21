@@ -230,24 +230,21 @@ mod tests {
     fn test_negation() {
         let modulus = Arc::new(BigUint::from(7u64));
 
-        // Test negation of zero
         let zero = F::zero(modulus.clone());
         let neg_zero = -&zero;
         assert!(zero.equals(&neg_zero));
 
-        // Test negation of non-zero element
         let three = F {
             value: BigUint::from(3u64),
             modulus: modulus.clone(),
         };
         let neg_three = -&three;
         let expected = F {
-            value: BigUint::from(4u64), // 7 - 3 = 4
+            value: BigUint::from(4u64),
             modulus: modulus.clone(),
         };
         assert!(neg_three.equals(&expected));
 
-        // Test that x + (-x) = 0
         let sum = &three + &neg_three;
         assert!(sum.equals(&zero));
     }

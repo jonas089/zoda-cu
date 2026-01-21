@@ -1,50 +1,3 @@
-// ============================================================================
-// ZODA Reed-Solomon Encoding Benchmark - GPU vs CPU
-// ============================================================================
-//
-// This benchmark measures the performance of vertical Reed-Solomon encoding
-// used in data availability systems like Celestia's rsema1d.
-//
-// TERMINOLOGY (matching rsema1d/Celestia):
-// ----------------------------------------
-// - K: number of original data rows
-// - N: number of parity rows
-// - Total rows: K + N (full erasure-coded output)
-// - RowSize: bytes per row (must be multiple of 4 for BabyBear)
-//
-// ENCODING ALGORITHM (Vertical Extension):
-// ----------------------------------------
-// The data is arranged as a matrix with K rows and (RowSize/4) columns.
-// For EACH column position independently:
-//   1. Gather K values from that column across all rows
-//   2. INTT(K) → convert K evaluations to polynomial coefficients
-//   3. Zero-pad coefficients from K to (K+N)
-//   4. NTT(K+N) → evaluate polynomial at (K+N) points
-//   5. Write (K+N) values back to column in output matrix
-//
-// This produces K+N total rows, where any K rows can recover the original data.
-//
-// GPU OPTIMIZATION STRATEGY:
-// --------------------------
-// The key insight is that ALL (RowSize/4) column positions can be processed
-// in parallel on the GPU. For large data:
-//   - CPU: processes columns sequentially → ~O(columns * NTT_time)
-//   - GPU: processes ALL columns in parallel → ~O(NTT_time) + transfer overhead
-//
-// With batched kernels and fused operations, the GPU achieves:
-//   - Single memory upload (all input data)
-//   - Batched INTT on ALL columns simultaneously
-//   - GPU-side zero-padding (no CPU roundtrip!)
-//   - Batched NTT on ALL columns simultaneously
-//   - Single memory download (all output data)
-//
-// For data with 1024 columns and 1024-size NTTs:
-//   - CPU does: 1024 × INTT + 1024 × NTT sequentially
-//   - GPU does: 1 × batched_INTT(1024 columns) + 1 × batched_NTT(1024 columns)
-//   → Expected speedup: ~1000x+ on pure compute, ~100x+ with memory transfer
-//
-// ============================================================================
-
 use crate::babybear::BabyBear;
 use crate::ntt_babybear::{intt as cpu_intt, ntt as cpu_ntt};
 use std::time::Instant;
@@ -52,45 +5,34 @@ use std::time::Instant;
 #[cfg(feature = "cuda")]
 use crate::cuda_ntt::{cuda_available, cuda_rs_encode_vertical, CudaBuffer};
 
-// ============================================================================
-// Configuration & Results
-// ============================================================================
-
 #[derive(Debug, Clone)]
 struct EncodingConfig {
-    k: usize,        // Number of original rows
-    n: usize,        // Number of parity rows
-    row_size: usize, // Bytes per row (must be multiple of 4 for BabyBear)
+    k: usize,
+    n: usize,
+    row_size: usize,
 }
 
 impl EncodingConfig {
-    /// Original data size in MB
     fn data_size_mb(&self) -> f64 {
         (self.k * self.row_size) as f64 / (1024.0 * 1024.0)
     }
 
-    /// Total rows after encoding (K original + N parity)
     fn total_rows(&self) -> usize {
         self.k + self.n
     }
 
-    /// Number of BabyBear elements per row (each element is 4 bytes)
     fn elements_per_row(&self) -> usize {
         self.row_size / 4
     }
 
-    /// Number of column positions = number of parallel NTT operations
-    /// This is the dimension that GPU parallelizes over
     fn num_positions(&self) -> usize {
         self.elements_per_row()
     }
 
-    /// NTT size for K rows (must be power of 2 >= K)
     fn ntt_size_k(&self) -> usize {
         self.k.next_power_of_two()
     }
 
-    /// NTT size for K+N rows (must be power of 2 >= K+N)
     fn ntt_size_kn(&self) -> usize {
         self.total_rows().next_power_of_two()
     }
@@ -106,14 +48,6 @@ struct EncodingResult {
     speedup: f64,
 }
 
-// ============================================================================
-// CPU Implementation (Baseline)
-// ============================================================================
-
-/// RS Encoding using CPU NTT - processes each column sequentially
-///
-/// This is the baseline for comparison. It's straightforward but slow for
-/// large data because it processes one column at a time.
 fn encode_cpu(config: &EncodingConfig) -> f64 {
     let k = config.k;
     let n = config.n;
@@ -121,7 +55,6 @@ fn encode_cpu(config: &EncodingConfig) -> f64 {
     let ntt_size_k = config.ntt_size_k();
     let ntt_size_kn = config.ntt_size_kn();
 
-    // Generate original data: K rows × num_positions columns
     let original_rows: Vec<Vec<BabyBear>> = (0..k)
         .map(|row_idx| {
             (0..num_positions)
@@ -132,18 +65,15 @@ fn encode_cpu(config: &EncodingConfig) -> f64 {
         })
         .collect();
 
-    // Allocate output: (K+N) rows × num_positions columns
     let mut encoded_rows: Vec<Vec<BabyBear>> = (0..k + n)
         .map(|_| vec![BabyBear::zero(); num_positions])
         .collect();
 
-    // Get twiddle factors for NTT sizes
     let omega_k = BabyBear::get_root_of_unity(ntt_size_k.trailing_zeros());
     let omega_kn = BabyBear::get_root_of_unity(ntt_size_kn.trailing_zeros());
 
     let start = Instant::now();
 
-    // Process each column position sequentially (CPU limitation)
     for col in 0..num_positions {
         // Step 1: Gather K values from this column across all original rows
         let mut values: Vec<BabyBear> = original_rows.iter().map(|row| row[col]).collect();
@@ -168,10 +98,6 @@ fn encode_cpu(config: &EncodingConfig) -> f64 {
 
     start.elapsed().as_secs_f64() * 1000.0
 }
-
-// ============================================================================
-// GPU Implementation (Fully Optimized)
-// ============================================================================
 
 /// RS Encoding using GPU with fully fused operations - ZERO CPU ROUNDTRIPS
 ///
@@ -203,10 +129,6 @@ fn encode_gpu_optimized(config: &EncodingConfig) -> Result<f64, String> {
     // Get twiddle factors
     let omega_k = BabyBear::get_root_of_unity(ntt_size_k.trailing_zeros());
     let omega_kn = BabyBear::get_root_of_unity(ntt_size_kn.trailing_zeros());
-
-    // ========================================================================
-    // Prepare input data in column-major layout for GPU efficiency
-    // ========================================================================
     // Layout: [col_0: k values, 0-padded to ntt_size_k]
     //         [col_1: k values, 0-padded to ntt_size_k]
     //         ...
@@ -226,31 +148,21 @@ fn encode_gpu_optimized(config: &EncodingConfig) -> Result<f64, String> {
         }
     }
     // Note: padding from k to ntt_size_k is already 0 (vec initialization)
-
-    // ========================================================================
-    // Allocate GPU buffers
-    // ========================================================================
-    let mut d_input = CudaBuffer::new(num_positions * ntt_size_k)?;     // Input data
-    let mut d_output = CudaBuffer::new(num_positions * ntt_size_kn)?;   // Final output
-    let mut d_work = CudaBuffer::new(num_positions * ntt_size_k)?;      // INTT workspace
+    let mut d_input = CudaBuffer::new(num_positions * ntt_size_k)?; // Input data
+    let mut d_output = CudaBuffer::new(num_positions * ntt_size_kn)?; // Final output
+    let mut d_work = CudaBuffer::new(num_positions * ntt_size_k)?; // INTT workspace
 
     let mut h_output: Vec<u64> = vec![0; num_positions * ntt_size_kn];
 
-    // ========================================================================
-    // GPU Encoding Pipeline - Everything happens on GPU!
-    // ========================================================================
-
     let start = Instant::now();
 
-    // --- Upload (Single Transfer) ---
     d_input.copy_from_host(&h_input)?;
 
-    // --- GPU Processing (Zero CPU Roundtrips!) ---
     unsafe {
         cuda_rs_encode_vertical(
-            d_input.as_ptr(),     // Input: num_positions columns of size ntt_size_k
-            d_output.as_ptr(),    // Output: num_positions columns of size ntt_size_kn
-            d_work.as_ptr(),      // Work buffer for INTT
+            d_input.as_ptr(),  // Input: num_positions columns of size ntt_size_k
+            d_output.as_ptr(), // Output: num_positions columns of size ntt_size_kn
+            d_work.as_ptr(),   // Work buffer for INTT
             num_positions as u32,
             ntt_size_k as u32,
             ntt_size_kn as u32,
@@ -264,18 +176,11 @@ fn encode_gpu_optimized(config: &EncodingConfig) -> Result<f64, String> {
 
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
-    // ========================================================================
-    // Result verification (optional - can be disabled for pure benchmark)
-    // ========================================================================
     // Output layout: h_output[col * ntt_size_kn + row] for row in [0, k+n)
     // This can be reshaped to (k+n) rows × num_positions columns
 
     Ok(elapsed)
 }
-
-// ============================================================================
-// Benchmark Runner
-// ============================================================================
 
 fn run_encoding_benchmark(config: EncodingConfig) -> Option<EncodingResult> {
     let data_size_mb = config.data_size_mb();
@@ -364,11 +269,6 @@ fn run_encoding_benchmark(config: EncodingConfig) -> Option<EncodingResult> {
 #[test]
 #[ignore]
 fn benchmark_zoda_optimal() {
-    println!("\n╔═══════════════════════════════════════════════════════════════════════╗");
-    println!("║                ZODA Reed-Solomon Encoding Benchmark                  ║");
-    println!("║                      GPU vs CPU Performance                          ║");
-    println!("╚═══════════════════════════════════════════════════════════════════════╝\n");
-
     #[cfg(not(feature = "cuda"))]
     {
         println!("CUDA support not compiled in.");
@@ -397,36 +297,99 @@ fn benchmark_zoda_optimal() {
 
         let configs = vec![
             // --- Small: warmup and correctness check ---
-            EncodingConfig { k: 64, n: 64, row_size: 4096 },       // 256 KB
-            EncodingConfig { k: 128, n: 128, row_size: 4096 },     // 512 KB
-            EncodingConfig { k: 256, n: 256, row_size: 4096 },     // 1 MB
-
+            EncodingConfig {
+                k: 64,
+                n: 64,
+                row_size: 4096,
+            }, // 256 KB
+            EncodingConfig {
+                k: 128,
+                n: 128,
+                row_size: 4096,
+            }, // 512 KB
+            EncodingConfig {
+                k: 256,
+                n: 256,
+                row_size: 4096,
+            }, // 1 MB
             // --- Medium: GPU advantage starts to show ---
-            EncodingConfig { k: 512, n: 512, row_size: 4096 },     // 2 MB
-            EncodingConfig { k: 1024, n: 1024, row_size: 4096 },   // 4 MB
-            EncodingConfig { k: 2048, n: 2048, row_size: 4096 },   // 8 MB
-
+            EncodingConfig {
+                k: 512,
+                n: 512,
+                row_size: 4096,
+            }, // 2 MB
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 4096,
+            }, // 4 MB
+            EncodingConfig {
+                k: 2048,
+                n: 2048,
+                row_size: 4096,
+            }, // 8 MB
             // --- Large: GPU should dominate ---
-            EncodingConfig { k: 4096, n: 4096, row_size: 4096 },   // 16 MB
-            EncodingConfig { k: 8192, n: 8192, row_size: 4096 },   // 32 MB
-            EncodingConfig { k: 16384, n: 16384, row_size: 4096 }, // 64 MB
-
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 4096,
+            }, // 16 MB
+            EncodingConfig {
+                k: 8192,
+                n: 8192,
+                row_size: 4096,
+            }, // 32 MB
+            EncodingConfig {
+                k: 16384,
+                n: 16384,
+                row_size: 4096,
+            }, // 64 MB
             // --- Very large: close to rsema1d defaults ---
-            EncodingConfig { k: 32768, n: 32768, row_size: 4096 }, // 128 MB (rsema1d default)
-            EncodingConfig { k: 65536, n: 65536, row_size: 4096 }, // 256 MB
-
+            EncodingConfig {
+                k: 32768,
+                n: 32768,
+                row_size: 4096,
+            }, // 128 MB (rsema1d default)
+            EncodingConfig {
+                k: 65536,
+                n: 65536,
+                row_size: 4096,
+            }, // 256 MB
             // --- Huge: larger rows = more parallelism = better GPU util ---
-            EncodingConfig { k: 16384, n: 16384, row_size: 8192 },  // 128 MB, 2048 positions
-            EncodingConfig { k: 16384, n: 16384, row_size: 16384 }, // 256 MB, 4096 positions
-            EncodingConfig { k: 32768, n: 32768, row_size: 16384 }, // 512 MB, 4096 positions
-
+            EncodingConfig {
+                k: 16384,
+                n: 16384,
+                row_size: 8192,
+            }, // 128 MB, 2048 positions
+            EncodingConfig {
+                k: 16384,
+                n: 16384,
+                row_size: 16384,
+            }, // 256 MB, 4096 positions
+            EncodingConfig {
+                k: 32768,
+                n: 32768,
+                row_size: 16384,
+            }, // 512 MB, 4096 positions
             // --- Massive: stress test (if your GPU has enough memory) ---
-            EncodingConfig { k: 32768, n: 32768, row_size: 32768 }, // 1 GB, 8192 positions
+            EncodingConfig {
+                k: 32768,
+                n: 32768,
+                row_size: 32768,
+            }, // 1 GB, 8192 positions
             // EncodingConfig { k: 65536, n: 65536, row_size: 32768 }, // 2 GB (uncomment if you have 24GB+ GPU)
 
             // --- Different expansion ratios ---
-            EncodingConfig { k: 16384, n: 32768, row_size: 4096 },  // 1:2 ratio (3x total size)
-            EncodingConfig { k: 16384, n: 49152, row_size: 4096 },  // 1:3 ratio (4x total size)
+            EncodingConfig {
+                k: 16384,
+                n: 32768,
+                row_size: 4096,
+            }, // 1:2 ratio (3x total size)
+            EncodingConfig {
+                k: 16384,
+                n: 49152,
+                row_size: 4096,
+            }, // 1:3 ratio (4x total size)
         ];
 
         let mut results = Vec::new();
@@ -443,20 +406,15 @@ fn benchmark_zoda_optimal() {
             println!();
         }
 
-        // ====================================================================
-        // Results Summary
-        // ====================================================================
-
-        println!("\n╔═══════════════════════════════════════════════════════════════════════╗");
-        println!("║                         Results Summary                               ║");
-        println!("╚═══════════════════════════════════════════════════════════════════════╝\n");
-
-        println!("{:<12} {:<10} {:<10} {:<10} │ {:<12} {:<12} │ {:<10}",
-            "Data MB", "K", "N", "RowSize", "CPU MB/s", "GPU MB/s", "Speedup");
+        println!(
+            "{:<12} {:<10} {:<10} {:<10} │ {:<12} {:<12} │ {:<10}",
+            "Data MB", "K", "N", "RowSize", "CPU MB/s", "GPU MB/s", "Speedup"
+        );
         println!("{}", "─".repeat(90));
 
         for result in &results {
-            println!("{:<12.1} {:<10} {:<10} {:<10} │ {:<12.1} {:<12.1} │ {:<10.1}x",
+            println!(
+                "{:<12.1} {:<10} {:<10} {:<10} │ {:<12.1} {:<12.1} │ {:<10.1}x",
                 result.config.data_size_mb(),
                 result.config.k,
                 result.config.n,
@@ -467,15 +425,7 @@ fn benchmark_zoda_optimal() {
             );
         }
 
-        // ====================================================================
-        // Performance Analysis
-        // ====================================================================
-
         if !results.is_empty() {
-            println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            println!("Performance Analysis");
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-
             // Analyze large data results (>= 64 MB)
             let large_results: Vec<_> = results
                 .iter()
@@ -485,20 +435,31 @@ fn benchmark_zoda_optimal() {
             if !large_results.is_empty() {
                 let avg_speedup = large_results.iter().map(|r| r.speedup).sum::<f64>()
                     / large_results.len() as f64;
-                let avg_gpu_throughput = large_results.iter().map(|r| r.gpu_throughput_mbs).sum::<f64>()
+                let avg_gpu_throughput = large_results
+                    .iter()
+                    .map(|r| r.gpu_throughput_mbs)
+                    .sum::<f64>()
                     / large_results.len() as f64;
-                let max_gpu_throughput = large_results.iter()
-                    .map(|r| r.gpu_throughput_mbs).fold(0.0f64, f64::max);
+                let max_gpu_throughput = large_results
+                    .iter()
+                    .map(|r| r.gpu_throughput_mbs)
+                    .fold(0.0f64, f64::max);
 
                 println!("For large data (>= 64 MB):");
-                println!("  Average GPU Speedup:      {:.1}x faster than CPU", avg_speedup);
+                println!(
+                    "  Average GPU Speedup:      {:.1}x faster than CPU",
+                    avg_speedup
+                );
                 println!("  Average GPU Throughput:   {:.1} MB/s", avg_gpu_throughput);
                 println!("  Peak GPU Throughput:      {:.1} MB/s", max_gpu_throughput);
 
                 println!("\nComparison with leopard-rs (GF(2^16) reference implementation):");
                 println!("  leopard-rs encode (AVX2):  ~1000-3000 MB/s");
                 println!("  leopard-rs encode (basic):  ~200-500 MB/s");
-                println!("  Our GPU (BabyBear):         {:.1} MB/s (peak)", max_gpu_throughput);
+                println!(
+                    "  Our GPU (BabyBear):         {:.1} MB/s (peak)",
+                    max_gpu_throughput
+                );
                 println!();
 
                 if max_gpu_throughput > 3000.0 {
@@ -526,8 +487,10 @@ fn benchmark_zoda_optimal() {
                     let efficiency = size_ratio / time_ratio;
 
                     if efficiency > 0.9 {
-                        println!("  {:.0} MB → {:.0} MB: {:.2}x data in {:.2}x time (efficient scaling)",
-                            prev_size, size, size_ratio, time_ratio);
+                        println!(
+                            "  {:.0} MB → {:.0} MB: {:.2}x data in {:.2}x time (efficient scaling)",
+                            prev_size, size, size_ratio, time_ratio
+                        );
                     }
                 }
 
@@ -535,9 +498,5 @@ fn benchmark_zoda_optimal() {
                 prev_gpu_time = gpu_time;
             }
         }
-
-        println!("\n╔═══════════════════════════════════════════════════════════════════════╗");
-        println!("║  Benchmark Complete!                                                  ║");
-        println!("╚═══════════════════════════════════════════════════════════════════════╝\n");
     }
 }
