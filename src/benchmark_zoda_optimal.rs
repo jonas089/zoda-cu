@@ -296,100 +296,65 @@ fn benchmark_zoda_optimal() {
         // But the benchmark handles any K, N by padding to next power of 2
 
         let configs = vec![
-            // --- Small: warmup and correctness check ---
-            EncodingConfig {
-                k: 64,
-                n: 64,
-                row_size: 4096,
-            }, // 256 KB
-            EncodingConfig {
-                k: 128,
-                n: 128,
-                row_size: 4096,
-            }, // 512 KB
-            EncodingConfig {
-                k: 256,
-                n: 256,
-                row_size: 4096,
-            }, // 1 MB
-            // --- Medium: GPU advantage starts to show ---
-            EncodingConfig {
-                k: 512,
-                n: 512,
-                row_size: 4096,
-            }, // 2 MB
-            EncodingConfig {
-                k: 1024,
-                n: 1024,
-                row_size: 4096,
-            }, // 4 MB
-            EncodingConfig {
-                k: 2048,
-                n: 2048,
-                row_size: 4096,
-            }, // 8 MB
-            // --- Large: GPU should dominate ---
-            EncodingConfig {
-                k: 4096,
-                n: 4096,
-                row_size: 4096,
-            }, // 16 MB
+            // Data size progression: 32MB, 64MB, 128MB, 256MB, 512MB, 1GB, 2GB, 3GB
+            // Formula: data_size_mb = (k * row_size) / (1024 * 1024)
+            // Using 1:1 expansion ratio (k = n) for consistency
+
+            // 32 MB: k=8192, row_size=4096 → 8192 * 4096 / 1024^2 = 32 MB
             EncodingConfig {
                 k: 8192,
                 n: 8192,
                 row_size: 4096,
-            }, // 32 MB
+            },
+
+            // 64 MB: k=16384, row_size=4096 → 16384 * 4096 / 1024^2 = 64 MB
             EncodingConfig {
                 k: 16384,
                 n: 16384,
                 row_size: 4096,
-            }, // 64 MB
-            // --- Very large: close to rsema1d defaults ---
+            },
+
+            // 128 MB: k=32768, row_size=4096 → 32768 * 4096 / 1024^2 = 128 MB
             EncodingConfig {
                 k: 32768,
                 n: 32768,
                 row_size: 4096,
-            }, // 128 MB (rsema1d default)
+            },
+
+            // 256 MB: k=65536, row_size=4096 → 65536 * 4096 / 1024^2 = 256 MB
             EncodingConfig {
                 k: 65536,
                 n: 65536,
                 row_size: 4096,
-            }, // 256 MB
-            // --- Huge: larger rows = more parallelism = better GPU util ---
-            EncodingConfig {
-                k: 16384,
-                n: 16384,
-                row_size: 8192,
-            }, // 128 MB, 2048 positions
-            EncodingConfig {
-                k: 16384,
-                n: 16384,
-                row_size: 16384,
-            }, // 256 MB, 4096 positions
+            },
+
+            // 512 MB: k=32768, row_size=16384 → 32768 * 16384 / 1024^2 = 512 MB
             EncodingConfig {
                 k: 32768,
                 n: 32768,
                 row_size: 16384,
-            }, // 512 MB, 4096 positions
-            // --- Massive: stress test (if your GPU has enough memory) ---
+            },
+
+            // 1 GB: k=32768, row_size=32768 → 32768 * 32768 / 1024^2 = 1024 MB
             EncodingConfig {
                 k: 32768,
                 n: 32768,
                 row_size: 32768,
-            }, // 1 GB, 8192 positions
-            // EncodingConfig { k: 65536, n: 65536, row_size: 32768 }, // 2 GB (uncomment if you have 24GB+ GPU)
+            },
 
-            // --- Different expansion ratios ---
+            // 2 GB: k=65536, row_size=32768 → 65536 * 32768 / 1024^2 = 2048 MB
             EncodingConfig {
-                k: 16384,
-                n: 32768,
-                row_size: 4096,
-            }, // 1:2 ratio (3x total size)
+                k: 65536,
+                n: 65536,
+                row_size: 32768,
+            },
+
+            // 3 GB: k=65536, row_size=49152 → 65536 * 49152 / 1024^2 = 3072 MB
             EncodingConfig {
-                k: 16384,
-                n: 49152,
-                row_size: 4096,
-            }, // 1:3 ratio (4x total size)
+                k: 65536,
+                n: 65536,
+                row_size: 49152,
+            },
         ];
 
         let mut results = Vec::new();
