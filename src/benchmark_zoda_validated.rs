@@ -49,9 +49,7 @@ struct ValidatedEncodingResult {
 }
 
 #[cfg(feature = "cuda")]
-fn encode_gpu_with_output(
-    config: &EncodingConfig,
-) -> Result<(Vec<Vec<BabyBear>>, f64), String> {
+fn encode_gpu_with_output(config: &EncodingConfig) -> Result<(Vec<Vec<BabyBear>>, f64), String> {
     let k = config.k;
     let n = config.n;
     let num_positions = config.num_positions();
@@ -276,14 +274,14 @@ fn validate_zoda_encoding(
 }
 
 #[cfg(feature = "cuda")]
-fn run_validated_encoding_benchmark(
-    config: EncodingConfig,
-) -> Option<ValidatedEncodingResult> {
+fn run_validated_encoding_benchmark(config: EncodingConfig) -> Option<ValidatedEncodingResult> {
     let data_size_mb = config.data_size_mb();
 
     println!(
         "  K={} original rows, N={} parity rows → {} total rows",
-        config.k, config.n, config.total_rows()
+        config.k,
+        config.n,
+        config.total_rows()
     );
     println!(
         "  Data volume: {:.1} MB original → {:.1} MB after encoding",
@@ -318,7 +316,10 @@ fn run_validated_encoding_benchmark(
         };
 
     if validation_passed {
-        println!("PASSED ({} checks: column encoding + RLC soundness, {:.2} ms)", num_checks, validation_time_ms);
+        println!(
+            "PASSED ({} checks: column encoding + RLC soundness, {:.2} ms)",
+            num_checks, validation_time_ms
+        );
     } else {
         println!("FAILED ({:.2} ms)", validation_time_ms);
     }
@@ -457,7 +458,10 @@ fn benchmark_zoda_validated() {
                 .sum::<f64>()
                 / results.len() as f64;
 
-            println!("\nValidation overhead: {:.1}% of encoding time", avg_overhead);
+            println!(
+                "\nValidation overhead: {:.1}% of encoding time",
+                avg_overhead
+            );
         }
     }
 }

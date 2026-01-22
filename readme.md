@@ -1,6 +1,8 @@
 ## CUDA + ZODA = SPEED at SCALE
 This is a CUDA accelerated implementation of ZODA that leverages prime field arithmetic over u64 BABYBEAR fields.
 
+> **⚠️ Security Notice**: This is a proof-of-concept implementation using the BabyBear field (p = 2^31 - 2^27 + 1), which provides ~31 bits of security. This is **NOT cryptographically secure** for production use. For production data availability systems, a larger field is required (e.g., Goldilocks p = 2^64 - 2^32 + 1 for 64-bit security, or a 128-bit field for full cryptographic security). The encoding is mathematically correct and performance characteristics would scale similarly to larger fields.
+
 ## Benchmark Results
 
 Encoding performance [see benchmark](src/benchmark_zoda_optimal.rs) on an RTX 5090 32 GB:
