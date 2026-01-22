@@ -8,13 +8,13 @@ pub mod zoda_babybear;
 pub mod cuda_ntt;
 
 #[cfg(test)]
-mod benchmark_zoda_optimal;
-
-#[cfg(test)]
 mod benchmark_zoda_validated;
 
 #[cfg(test)]
 mod benchmark_zoda_eigenda_comparison;
+
+#[cfg(test)]
+pub mod benchmark_utils;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
