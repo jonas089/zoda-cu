@@ -234,97 +234,58 @@ fn validate_zoda_encoding(
     // ========================================================================
 
     // 1. Derive random coefficients (one per column position)
+    // Following reference implementation at zoda_babybear.rs:159
     let data_root = compute_data_root(encoded_rows);
     let coefficients = generate_deterministic_coefficients(&data_root, num_positions);
 
     // 2. Compute RLC for first k rows (original data)
-    let mut rlc_original: Vec<BabyBear> = Vec::with_capacity(k);
+    // Following reference implementation at zoda_babybear.rs:178-184
+    let mut y: Vec<BabyBear> = Vec::with_capacity(k);
     for row_idx in 0..k {
-        let mut sum = BabyBear::zero();
+        let mut running_sum = BabyBear::zero();
         for col_idx in 0..num_positions {
-            sum = sum + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
+            running_sum = running_sum + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
         }
-        rlc_original.push(sum);
-    }
-
-    // Debug: Verify first k rows match before extension
-    for row_idx in 0..k.min(4) {
-        let mut computed = BabyBear::zero();
-        for col_idx in 0..num_positions {
-            computed = computed + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
-        }
-        if computed.value != rlc_original[row_idx].value {
-            println!(
-                "  DEBUG: RLC mismatch at original row {}: computed={}, stored={}",
-                row_idx, computed.value, rlc_original[row_idx].value
-            );
-        }
+        y.push(running_sum);
     }
 
     // 3. Extend RLC values via Reed-Solomon
-    // The key insight: we're treating the k RLC values as evaluations at
-    // the FIRST k roots of omega_kn, not as evaluations at roots of omega_k!
-    // This is because the rows themselves are evaluation points in the extended domain.
+    // Following reference implementation at zoda_babybear.rs:187-203
+    // Key insight: We extend in the k domain (omega_k), not the k+n domain!
+    // The reference resizes to ntt_n = data_square.rows.next_power_of_two()
+    // which is ntt_size_k in our code.
+    let mut y_coeffs = y.clone();
+    y_coeffs.resize(ntt_size_k, BabyBear::zero());
+    cpu_intt(&mut y_coeffs, omega_k);
 
-    // So we need to:
-    // 1. Pad k values to ntt_size_kn (the extended domain size)
-    // 2. INTT with omega_kn to get coefficients
-    // 3. NTT with omega_kn to get extended evaluations
-
-    let mut rlc_extended = rlc_original.clone();
-    rlc_extended.resize(ntt_size_kn, BabyBear::zero());
-    cpu_intt(&mut rlc_extended, omega_kn);
-    cpu_ntt(&mut rlc_extended, omega_kn);
-
-    // Debug: Verify first k values are preserved after extension
-    for row_idx in 0..k.min(4) {
-        if rlc_extended[row_idx].value != rlc_original[row_idx].value {
-            println!(
-                "  DEBUG: Extension changed original row {}: before={}, after={}",
-                row_idx, rlc_original[row_idx].value, rlc_extended[row_idx].value
-            );
-        }
-    }
+    // Evaluate y over extended domain
+    let mut y_encoded = y_coeffs.clone();
+    cpu_ntt(&mut y_encoded, omega_k);
 
     // 4. Verify random rows (both original and parity)
-    // IMPORTANT: Only check rows 0..k+n, not the full ntt_size_kn
-    let num_rlc_checks = 64.min(k + n);
+    // Following reference implementation at zoda_babybear.rs:205-214
+    // CRITICAL: y_encoded has length ntt_size_k, but our encoded_rows has k+n rows
+    // We can only verify rows 0..ntt_size_k.min(k+n)
+    let max_verifiable_row = ntt_size_k.min(k + n);
+    let num_rlc_checks = 64.min(max_verifiable_row);
     let mut rlc_checks_passed = true;
 
     for check_idx in 0..num_rlc_checks {
-        // Spread checks across ACTUAL rows (0 through k+n-1), not padded domain
-        let row_idx = (check_idx * (k + n)) / num_rlc_checks;
-
-        // Safety check: ensure we're within bounds
-        if row_idx >= k + n {
-            continue;
-        }
+        // Check evenly distributed rows across the valid range
+        let row_idx = (check_idx * max_verifiable_row) / num_rlc_checks;
 
         // Compute RLC for this row
-        let mut computed_rlc = BabyBear::zero();
+        let mut running_sum = BabyBear::zero();
         for col_idx in 0..num_positions {
-            computed_rlc = computed_rlc + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
+            running_sum = running_sum + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
         }
 
-        // Verify it matches the extended RLC value
-        if computed_rlc.value != rlc_extended[row_idx].value {
+        // Check against extended RLC values
+        let expected = y_encoded[row_idx];
+        if running_sum.value != expected.value {
             println!(
                 "  ✗ RLC Soundness FAILED at row {}: computed={}, expected={}",
-                row_idx, computed_rlc.value, rlc_extended[row_idx].value
-            );
-            println!(
-                "    First few encoded values: {:?}",
-                &encoded_rows[row_idx][..4.min(num_positions)]
-                    .iter()
-                    .map(|v| v.value)
-                    .collect::<Vec<_>>()
-            );
-            println!(
-                "    First few coefficients: {:?}",
-                &coefficients[..4.min(num_positions)]
-                    .iter()
-                    .map(|v| v.value)
-                    .collect::<Vec<_>>()
+                row_idx, running_sum.value, expected.value
             );
             rlc_checks_passed = false;
             break;
