@@ -1,0 +1,6 @@
+{
+    // enable cuda feature
+    "rust-analyzer.cargo.features": [
+        "cuda"
+    ],
+}

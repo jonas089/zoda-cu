@@ -246,30 +246,29 @@ fn validate_zoda_encoding(
         })
         .collect();
 
-    // 3. Extend RLC values via Reed-Solomon
-    // Following reference implementation at zoda_babybear.rs:187-203
-    // Key insight: We extend in the k domain (omega_k), not the k+n domain!
-    // The reference resizes to ntt_n = data_square.rows.next_power_of_two()
-    // which is ntt_size_k in our code.
+    // 3. Extend RLC values via Reed-Solomon (k → k+n)
+    // This matches what the GPU kernel does for column encoding:
+    // - Start with k values
+    // - INTT in k domain (omega_k) to get polynomial coefficients
+    // - Pad coefficients to k+n
+    // - NTT in k+n domain (omega_kn) to get k+n evaluations
     let mut y_coeffs = y.clone();
     y_coeffs.resize(ntt_size_k, BabyBear::zero());
     cpu_intt(&mut y_coeffs, omega_k);
 
-    // Evaluate y over extended domain
+    // Extend to k+n domain
+    y_coeffs.resize(ntt_size_kn, BabyBear::zero());
     let mut y_encoded = y_coeffs.clone();
-    cpu_ntt(&mut y_encoded, omega_k);
+    cpu_ntt(&mut y_encoded, omega_kn);
 
     // 4. Verify random rows (both original and parity)
-    // Following reference implementation at zoda_babybear.rs:205-214
-    // CRITICAL: y_encoded has length ntt_size_k, but our encoded_rows has k+n rows
-    // We can only verify rows 0..ntt_size_k.min(k+n)
-    let max_verifiable_row = ntt_size_k.min(k + n);
-    let num_rlc_checks = 64.min(max_verifiable_row);
+    // Now y_encoded has length ntt_size_kn, so we can verify all k+n rows
+    let num_rlc_checks = 64.min(k + n);
     let mut rlc_checks_passed = true;
 
     for check_idx in 0..num_rlc_checks {
-        // Check evenly distributed rows across the valid range
-        let row_idx = (check_idx * max_verifiable_row) / num_rlc_checks;
+        // Check evenly distributed rows across all k+n rows
+        let row_idx = (check_idx * (k + n)) / num_rlc_checks;
 
         // Compute RLC for this row
         let running_sum = encoded_rows[row_idx]
