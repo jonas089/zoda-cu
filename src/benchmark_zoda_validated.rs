@@ -246,39 +246,61 @@ fn validate_zoda_encoding(
         })
         .collect();
 
-    // 3. Extend RLC values via Reed-Solomon
-    // Match the reference implementation: use SAME omega for INTT and NTT
-    // This preserves the first k values and allows verification
-    let mut y_coeffs = y.clone();
-    y_coeffs.resize(ntt_size_k, BabyBear::zero());
-    cpu_intt(&mut y_coeffs, omega_k);
+    // 3. Verify RLC forms a valid Reed-Solomon codeword
+    // Key insight: Since each column is RS-encoded and RLC is a linear combination,
+    // the RLC values across all k+n rows should form a valid RS codeword.
+    // We verify this by checking the codeword has degree < k.
 
-    let mut y_encoded = y_coeffs.clone();
-    cpu_ntt(&mut y_encoded, omega_k);
+    // Compute RLC for ALL k+n rows
+    let all_rlc: Vec<BabyBear> = encoded_rows
+        .iter()
+        .take(k + n)
+        .map(|row| {
+            row.iter()
+                .zip(coefficients.iter())
+                .fold(BabyBear::zero(), |acc, (&val, &coeff)| acc + (val * coeff))
+        })
+        .collect();
 
-    // 4. Verify ONLY the first k rows (data portion)
-    // We cannot verify parity rows because they're in a different domain
-    // This is still valid: it confirms the data portion is consistent
-    let num_rlc_checks = 64.min(k);
-    let mut rlc_checks_passed = true;
+    // Verify these k+n values form a valid RS codeword
+    // Method: INTT to get coefficients, check that coefficients k..k+n are all zero
+    let mut rlc_coeffs = all_rlc.clone();
+    rlc_coeffs.resize(ntt_size_kn, BabyBear::zero());
+    cpu_intt(&mut rlc_coeffs, omega_kn);
 
-    for check_idx in 0..num_rlc_checks {
-        let row_idx = (check_idx * k) / num_rlc_checks;
-
-        let running_sum = encoded_rows[row_idx]
-            .iter()
-            .zip(coefficients.iter())
-            .fold(BabyBear::zero(), |acc, (&val, &coeff)| acc + (val * coeff));
-
-        if running_sum.value != y_encoded[row_idx].value {
-            println!(
-                "  RLC Soundness FAILED at row {}: computed={}, expected={}",
-                row_idx, running_sum.value, y_encoded[row_idx].value
-            );
-            rlc_checks_passed = false;
+    // Check coefficients k onward are zero (degree < k)
+    let mut is_valid_codeword = true;
+    for i in k..ntt_size_kn {
+        if rlc_coeffs[i].value != 0 {
+            println!("  RLC Soundness FAILED: coefficient {} = {} (expected 0, degree >= k)",
+                     i, rlc_coeffs[i].value);
+            is_valid_codeword = false;
             break;
         }
     }
+
+    let rlc_checks_passed = if !is_valid_codeword {
+        false
+    } else {
+        // Additionally verify by re-encoding: NTT should give back original values
+        let mut rlc_reencoded = rlc_coeffs.clone();
+        cpu_ntt(&mut rlc_reencoded, omega_kn);
+
+        let mut passed = true;
+        let num_checks = 64.min(k + n);
+        for check_idx in 0..num_checks {
+            let row_idx = (check_idx * (k + n)) / num_checks;
+            if all_rlc[row_idx].value != rlc_reencoded[row_idx].value {
+                println!(
+                    "  RLC Soundness FAILED at row {}: original={}, reencoded={}",
+                    row_idx, all_rlc[row_idx].value, rlc_reencoded[row_idx].value
+                );
+                passed = false;
+                break;
+            }
+        }
+        passed
+    };
 
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
     let all_checks_passed = column_checks_passed && rlc_checks_passed;
