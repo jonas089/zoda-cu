@@ -433,7 +433,7 @@ fn benchmark_zoda_eigenda_comparison() {
                 let status = if result.validation_passed { "✓ PASS" } else { "✗ FAIL" };
                 writeln!(
                     md_file,
-                    "| {} | {} | {} | {:,} | {:.2} | {} |",
+                    "| {} | {} | {} | {} | {:.2} | {} |",
                     data_label,
                     result.config.k,
                     result.config.n,
@@ -534,7 +534,7 @@ fn benchmark_zoda_eigenda_comparison() {
             };
 
             println!(
-                "{:<20} {:<8} {:<8} │ {:<15,} {:<15.2} │ {}",
+                "{:<20} {:<8} {:<8} │ {:<15} {:<15.2} │ {}",
                 data_label,
                 result.config.k,
                 result.config.n,
