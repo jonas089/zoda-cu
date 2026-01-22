@@ -6,7 +6,9 @@ This is a CUDA accelerated implementation of ZODA that leverages prime field ari
 ## Benchmark Results
 cargo test benchmark_zoda_eigenda_comparison --features cuda --release -- --ignored --nocapture
 
-Direct comparison against rsema1d:
+Direct comparison against [rsema1d](https://github.com/celestiaorg/eigenda-kzg-bench):
+
+On a single RTX 5090 (32 GB):
 
 | Configuration | K | N | ZODA (ns/op) | ZODA (MB/s) |  EMA (ns/op) |  EMA (MB/s) | Speedup | Status |
 |---------------|---|---|--------------|-------------|---------------------|--------------------|---------|---------| 
