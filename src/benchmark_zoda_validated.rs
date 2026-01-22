@@ -247,22 +247,25 @@ fn validate_zoda_encoding(
         .collect();
 
     // 3. Extend RLC values via Reed-Solomon (k → k+n)
-    // This matches what the GPU kernel does for column encoding:
-    // - Start with k values
-    // - INTT in k domain (omega_k) to get polynomial coefficients
-    // - Pad coefficients to k+n
-    // - NTT in k+n domain (omega_kn) to get k+n evaluations
+    // The k RLC values we computed are from encoded_rows[0..k].
+    // These rows are evaluations at omega_kn^0, omega_kn^1, ..., omega_kn^(k-1)
+    // (the first k points in the k+n domain).
+    //
+    // To extend via RS, we need to:
+    // 1. Treat these k values as evaluations in the k+n domain
+    // 2. INTT in the k+n domain to get coefficients
+    // 3. NTT in the k+n domain to get all k+n evaluations
+    //
+    // This is DIFFERENT from column encoding, which starts in the k domain!
+
     let mut y_coeffs = y.clone();
-    y_coeffs.resize(ntt_size_k, BabyBear::zero());
-    cpu_intt(&mut y_coeffs, omega_k);
+    y_coeffs.resize(ntt_size_kn, BabyBear::zero());  // Pad directly to k+n
+    cpu_intt(&mut y_coeffs, omega_kn);                // INTT in k+n domain
 
-    // Extend to k+n domain
-    y_coeffs.resize(ntt_size_kn, BabyBear::zero());
     let mut y_encoded = y_coeffs.clone();
-    cpu_ntt(&mut y_encoded, omega_kn);
+    cpu_ntt(&mut y_encoded, omega_kn);                // NTT in k+n domain
 
-    // 4. Verify random rows (both original and parity)
-    // Now y_encoded has length ntt_size_kn, so we can verify all k+n rows
+    // 4. Verify all k+n rows
     let num_rlc_checks = 64.min(k + n);
     let mut rlc_checks_passed = true;
 
