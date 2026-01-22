@@ -333,70 +333,236 @@ fn benchmark_zoda_eigenda_comparison() {
         // Data size = k * row_size
         let configs = vec![
             // 128KB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 128 },   // 128KB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 128 },   // 128KB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 32 },    // 128KB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 32 },   // 128KB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 128,
+            }, // 128KB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 128,
+            }, // 128KB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 32,
+            }, // 128KB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 32,
+            }, // 128KB, k=4096, n=12288
             // 1MB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 1024 },  // 1MB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 1024 },  // 1MB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 256 },   // 1MB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 256 },  // 1MB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 1024,
+            }, // 1MB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 1024,
+            }, // 1MB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 256,
+            }, // 1MB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 256,
+            }, // 1MB, k=4096, n=12288
             // 4MB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 4096 },  // 4MB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 4096 },  // 4MB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 1024 },  // 4MB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 1024 }, // 4MB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 4096,
+            }, // 4MB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 4096,
+            }, // 4MB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 1024,
+            }, // 4MB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 1024,
+            }, // 4MB, k=4096, n=12288
             // 8MB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 8192 },  // 8MB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 8192 },  // 8MB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 2048 },  // 8MB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 2048 }, // 8MB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 8192,
+            }, // 8MB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 8192,
+            }, // 8MB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 2048,
+            }, // 8MB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 2048,
+            }, // 8MB, k=4096, n=12288
             // 16MB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 16384 }, // 16MB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 16384 }, // 16MB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 4096 },  // 16MB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 4096 }, // 16MB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 16384,
+            }, // 16MB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 16384,
+            }, // 16MB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 4096,
+            }, // 16MB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 4096,
+            }, // 16MB, k=4096, n=12288
             // 32MB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 32768 }, // 32MB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 32768 }, // 32MB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 8192 },  // 32MB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 8192 }, // 32MB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 32768,
+            }, // 32MB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 32768,
+            }, // 32MB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 8192,
+            }, // 32MB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 8192,
+            }, // 32MB, k=4096, n=12288
             // 64MB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 65536 }, // 64MB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 65536 }, // 64MB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 16384 }, // 64MB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 16384 }, // 64MB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 65536,
+            }, // 64MB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 65536,
+            }, // 64MB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 16384,
+            }, // 64MB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 16384,
+            }, // 64MB, k=4096, n=12288
             // 128MB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 131072 }, // 128MB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 131072 }, // 128MB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 32768 },  // 128MB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 32768 }, // 128MB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 131072,
+            }, // 128MB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 131072,
+            }, // 128MB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 32768,
+            }, // 128MB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 32768,
+            }, // 128MB, k=4096, n=12288
             // 256MB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 262144 }, // 256MB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 262144 }, // 256MB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 65536 },  // 256MB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 65536 }, // 256MB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 262144,
+            }, // 256MB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 262144,
+            }, // 256MB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 65536,
+            }, // 256MB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 65536,
+            }, // 256MB, k=4096, n=12288
             // 512MB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 524288 }, // 512MB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 524288 }, // 512MB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 131072 }, // 512MB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 131072 }, // 512MB, k=4096, n=12288
-
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 524288,
+            }, // 512MB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 524288,
+            }, // 512MB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 131072,
+            }, // 512MB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 131072,
+            }, // 512MB, k=4096, n=12288
             // 1GB configurations
-            EncodingConfig { k: 1024, n: 1024, row_size: 1048576 }, // 1GB, k=1024, n=1024
-            EncodingConfig { k: 1024, n: 3072, row_size: 1048576 }, // 1GB, k=1024, n=3072
-            EncodingConfig { k: 4096, n: 4096, row_size: 262144 },  // 1GB, k=4096, n=4096
-            EncodingConfig { k: 4096, n: 12288, row_size: 262144 }, // 1GB, k=4096, n=12288
+            EncodingConfig {
+                k: 1024,
+                n: 1024,
+                row_size: 1048576,
+            }, // 1GB, k=1024, n=1024
+            EncodingConfig {
+                k: 1024,
+                n: 3072,
+                row_size: 1048576,
+            }, // 1GB, k=1024, n=3072
+            EncodingConfig {
+                k: 4096,
+                n: 4096,
+                row_size: 262144,
+            }, // 1GB, k=4096, n=4096
+            EncodingConfig {
+                k: 4096,
+                n: 12288,
+                row_size: 262144,
+            }, // 1GB, k=4096, n=12288
         ];
 
         let mut results = Vec::new();
@@ -424,51 +590,14 @@ fn benchmark_zoda_eigenda_comparison() {
         // Write results to files
         println!("\nWriting results to files...");
 
-        // Write CSV file
-        if let Ok(mut csv_file) = File::create("zoda_eigenda_benchmark.csv") {
-            writeln!(csv_file, "Data Size,Data MB,K,N,ZODA Time (ns),ZODA (MB/s),EigenDA EMA Time (ns),EigenDA EMA (MB/s),Speedup,Validation Status").ok();
-            for result in &results {
-                let data_label = if result.config.data_size_kb() < 1024.0 {
-                    format!("{:.0}KB", result.config.data_size_kb())
-                } else {
-                    format!("{:.0}MB", result.config.data_size_mb())
-                };
-                let status = if result.validation_passed { "PASS" } else { "FAIL" };
-
-                let (eigenda_time, eigenda_throughput, speedup) =
-                    if let Some((ref_time, ref_throughput)) = get_eigenda_reference(
-                        result.config.data_size_mb(),
-                        result.config.k,
-                        result.config.n
-                    ) {
-                        let speedup = ref_time as f64 / result.encode_time_ns as f64;
-                        (format!("{}", ref_time), format!("{:.2}", ref_throughput), format!("{:.2}x", speedup))
-                    } else {
-                        ("N/A".to_string(), "N/A".to_string(), "N/A".to_string())
-                    };
-
-                writeln!(
-                    csv_file,
-                    "{},{:.6},{},{},{},{:.2},{},{},{},{}",
-                    data_label,
-                    result.config.data_size_mb(),
-                    result.config.k,
-                    result.config.n,
-                    result.encode_time_ns,
-                    result.throughput_mbs,
-                    eigenda_time,
-                    eigenda_throughput,
-                    speedup,
-                    status
-                ).ok();
-            }
-            println!("  ✓ CSV results written to: zoda_eigenda_benchmark.csv");
-        }
-
         // Write Markdown table
         if let Ok(mut md_file) = File::create("zoda_eigenda_benchmark.md") {
             writeln!(md_file, "# ZODA Encoding Benchmark Results\n").ok();
-            writeln!(md_file, "## Performance Comparison: ZODA vs EigenDA EMA Encoding\n").ok();
+            writeln!(
+                md_file,
+                "## Performance Comparison: ZODA vs EigenDA EMA Encoding\n"
+            )
+            .ok();
             writeln!(md_file, "| Configuration | K | N | ZODA (ns/op) | ZODA (MB/s) | EigenDA EMA (ns/op) | EigenDA EMA (MB/s) | Speedup | Status |").ok();
             writeln!(md_file, "|---------------|---|---|--------------|-------------|---------------------|--------------------|---------|---------| ").ok();
 
@@ -478,16 +607,24 @@ fn benchmark_zoda_eigenda_comparison() {
                 } else {
                     format!("{:.0}MB", result.config.data_size_mb())
                 };
-                let status = if result.validation_passed { "✓ PASS" } else { "✗ FAIL" };
+                let status = if result.validation_passed {
+                    "✓ PASS"
+                } else {
+                    "✗ FAIL"
+                };
 
                 let (eigenda_time, eigenda_throughput, speedup) =
                     if let Some((ref_time, ref_throughput)) = get_eigenda_reference(
                         result.config.data_size_mb(),
                         result.config.k,
-                        result.config.n
+                        result.config.n,
                     ) {
                         let speedup_val = ref_time as f64 / result.encode_time_ns as f64;
-                        (format!("{}", ref_time), format!("{:.2}", ref_throughput), format!("{:.2}x", speedup_val))
+                        (
+                            format!("{}", ref_time),
+                            format!("{:.2}", ref_throughput),
+                            format!("{:.2}x", speedup_val),
+                        )
                     } else {
                         ("-".to_string(), "-".to_string(), "-".to_string())
                     };
@@ -504,13 +641,22 @@ fn benchmark_zoda_eigenda_comparison() {
                     eigenda_throughput,
                     speedup,
                     status
-                ).ok();
+                )
+                .ok();
             }
 
             // Add statistics section
             writeln!(md_file, "\n## Statistics by Data Size\n").ok();
-            writeln!(md_file, "| Data Size | Avg MB/s | Min MB/s | Max MB/s | Configs |").ok();
-            writeln!(md_file, "|-----------|----------|----------|----------|---------|").ok();
+            writeln!(
+                md_file,
+                "| Data Size | Avg MB/s | Min MB/s | Max MB/s | Configs |"
+            )
+            .ok();
+            writeln!(
+                md_file,
+                "|-----------|----------|----------|----------|---------|"
+            )
+            .ok();
 
             let data_sizes = vec![
                 (128.0, "128KB"),
@@ -547,15 +693,20 @@ fn benchmark_zoda_eigenda_comparison() {
                     writeln!(
                         md_file,
                         "| {} | {:.2} | {:.2} | {:.2} | {} |",
-                        label, avg_throughput, min_throughput, max_throughput, size_results.len()
-                    ).ok();
+                        label,
+                        avg_throughput,
+                        min_throughput,
+                        max_throughput,
+                        size_results.len()
+                    )
+                    .ok();
                 }
             }
 
             // Overall statistics
             if !results.is_empty() {
-                let avg_throughput = results.iter().map(|r| r.throughput_mbs).sum::<f64>()
-                    / results.len() as f64;
+                let avg_throughput =
+                    results.iter().map(|r| r.throughput_mbs).sum::<f64>() / results.len() as f64;
                 let max_throughput = results
                     .iter()
                     .map(|r| r.throughput_mbs)
@@ -563,9 +714,20 @@ fn benchmark_zoda_eigenda_comparison() {
                 let passed = results.iter().filter(|r| r.validation_passed).count();
 
                 writeln!(md_file, "\n## Overall Statistics\n").ok();
-                writeln!(md_file, "- **Average Throughput**: {:.2} MB/s", avg_throughput).ok();
+                writeln!(
+                    md_file,
+                    "- **Average Throughput**: {:.2} MB/s",
+                    avg_throughput
+                )
+                .ok();
                 writeln!(md_file, "- **Peak Throughput**: {:.2} MB/s", max_throughput).ok();
-                writeln!(md_file, "- **Validation Success**: {}/{}", passed, results.len()).ok();
+                writeln!(
+                    md_file,
+                    "- **Validation Success**: {}/{}",
+                    passed,
+                    results.len()
+                )
+                .ok();
                 writeln!(md_file, "- **Total Configurations**: {}", results.len()).ok();
 
                 // Add speedup comparison
@@ -574,7 +736,7 @@ fn benchmark_zoda_eigenda_comparison() {
                     if let Some((ref_time, _)) = get_eigenda_reference(
                         result.config.data_size_mb(),
                         result.config.k,
-                        result.config.n
+                        result.config.n,
                     ) {
                         let speedup = ref_time as f64 / result.encode_time_ns as f64;
                         speedups.push(speedup);
@@ -587,7 +749,12 @@ fn benchmark_zoda_eigenda_comparison() {
                     let max_speedup = speedups.iter().fold(0.0f64, |a, &b| a.max(b));
 
                     writeln!(md_file, "\n## Speedup vs EigenDA EMA\n").ok();
-                    writeln!(md_file, "Based on {} comparable configurations:\n", speedups.len()).ok();
+                    writeln!(
+                        md_file,
+                        "Based on {} comparable configurations:\n",
+                        speedups.len()
+                    )
+                    .ok();
                     writeln!(md_file, "- **Average Speedup**: {:.2}x", avg_speedup).ok();
                     writeln!(md_file, "- **Minimum Speedup**: {:.2}x", min_speedup).ok();
                     writeln!(md_file, "- **Maximum Speedup**: {:.2}x", max_speedup).ok();
@@ -603,7 +770,15 @@ fn benchmark_zoda_eigenda_comparison() {
         println!("{}", "═".repeat(130));
         println!(
             "{:<15} {:<6} {:<6} │ {:<12} {:<10} │ {:<12} {:<10} │ {:<10} {:<10}",
-            "Config", "k", "n", "ZODA (ns)", "ZODA MB/s", "EMA (ns)", "EMA MB/s", "Speedup", "Status"
+            "Config",
+            "k",
+            "n",
+            "ZODA (ns)",
+            "ZODA MB/s",
+            "EMA (ns)",
+            "EMA MB/s",
+            "Speedup",
+            "Status"
         );
         println!("{}", "─".repeat(130));
 
@@ -626,13 +801,13 @@ fn benchmark_zoda_eigenda_comparison() {
                 if let Some((ref_time, ref_throughput)) = get_eigenda_reference(
                     result.config.data_size_mb(),
                     result.config.k,
-                    result.config.n
+                    result.config.n,
                 ) {
                     let speedup_val = ref_time as f64 / result.encode_time_ns as f64;
                     (
                         format!("{}", ref_time),
                         format!("{:.2}", ref_throughput),
-                        format!("{:.2}x", speedup_val)
+                        format!("{:.2}x", speedup_val),
                     )
                 } else {
                     ("-".to_string(), "-".to_string(), "-".to_string())
@@ -666,7 +841,7 @@ fn benchmark_zoda_eigenda_comparison() {
             if let Some((ref_time, _)) = get_eigenda_reference(
                 result.config.data_size_mb(),
                 result.config.k,
-                result.config.n
+                result.config.n,
             ) {
                 let speedup = ref_time as f64 / result.encode_time_ns as f64;
                 speedups.push(speedup);
@@ -678,7 +853,10 @@ fn benchmark_zoda_eigenda_comparison() {
             let min_speedup = speedups.iter().fold(f64::INFINITY, |a, &b| a.min(b));
             let max_speedup = speedups.iter().fold(0.0f64, |a, &b| a.max(b));
 
-            println!("\nSpeedup vs EigenDA EMA ({} comparable configs):", speedups.len());
+            println!(
+                "\nSpeedup vs EigenDA EMA ({} comparable configs):",
+                speedups.len()
+            );
             println!("  Average: {:.2}x", avg_speedup);
             println!("  Min:     {:.2}x", min_speedup);
             println!("  Max:     {:.2}x", max_speedup);
@@ -722,7 +900,11 @@ fn benchmark_zoda_eigenda_comparison() {
 
                 println!(
                     "  {:<8} Avg: {:>8.2} MB/s  Min: {:>8.2} MB/s  Max: {:>8.2} MB/s  ({} configs)",
-                    label, avg_throughput, min_throughput, max_throughput, size_results.len()
+                    label,
+                    avg_throughput,
+                    min_throughput,
+                    max_throughput,
+                    size_results.len()
                 );
             }
         }
@@ -732,8 +914,8 @@ fn benchmark_zoda_eigenda_comparison() {
             println!("\nOverall Statistics:");
             println!("{}", "─".repeat(80));
 
-            let avg_throughput = results.iter().map(|r| r.throughput_mbs).sum::<f64>()
-                / results.len() as f64;
+            let avg_throughput =
+                results.iter().map(|r| r.throughput_mbs).sum::<f64>() / results.len() as f64;
             let max_throughput = results
                 .iter()
                 .map(|r| r.throughput_mbs)
@@ -741,7 +923,8 @@ fn benchmark_zoda_eigenda_comparison() {
 
             println!("  Average Throughput:     {:.2} MB/s", avg_throughput);
             println!("  Peak Throughput:        {:.2} MB/s", max_throughput);
-            println!("  Validation Success:     {}/{}",
+            println!(
+                "  Validation Success:     {}/{}",
                 results.iter().filter(|r| r.validation_passed).count(),
                 results.len()
             );
