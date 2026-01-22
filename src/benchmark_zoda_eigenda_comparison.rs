@@ -487,7 +487,7 @@ fn benchmark_zoda_eigenda_comparison() {
                         result.config.n
                     ) {
                         let speedup_val = ref_time as f64 / result.encode_time_ns as f64;
-                        (format!("{:,}", ref_time), format!("{:.2}", ref_throughput), format!("{:.2}x", speedup_val))
+                        (format!("{}", ref_time), format!("{:.2}", ref_throughput), format!("{:.2}x", speedup_val))
                     } else {
                         ("-".to_string(), "-".to_string(), "-".to_string())
                     };
