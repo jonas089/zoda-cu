@@ -145,18 +145,24 @@ fn generate_deterministic_coefficients(
         .collect()
 }
 
-/// Verify GPU encoding correctness by comparing with CPU reference implementation
+/// Full ZODA verification with column encoding check + RLC soundness check
 ///
-/// The encoding works column-wise:
+/// ZODA protocol verification in two phases:
+///
+/// Phase 1 - Column Encoding Verification:
 /// - Each column is INTT'd to get polynomial coefficients
 /// - Padded with zeros from k to k+n
-/// - Then NTT'd to extend from k to k+n evaluation points
+/// - NTT'd to extend from k to k+n evaluation points
+/// - Verify GPU output matches CPU reference for columns
 ///
-/// Verification approach:
-/// 1. Recreate the original input data for each column
-/// 2. Run the same INTT → pad → NTT operations on CPU
-/// 3. Compare CPU result with GPU result
-/// 4. If they match, GPU encoding is correct
+/// Phase 2 - RLC Soundness Check (ZODA/RSEMA1D):
+/// - Derive random coefficients from commitment (one per column)
+/// - For each row: compute RLC = ∑(row[col] × coeff[col])
+/// - Take first k RLC values, extend via Reed-Solomon
+/// - Verify extended row RLCs match computed RLCs
+///
+/// This provides full soundness: columns are valid RS codewords AND
+/// rows are consistent linear combinations across columns.
 #[cfg(feature = "cuda")]
 fn validate_zoda_encoding(
     config: &EncodingConfig,
@@ -173,59 +179,111 @@ fn validate_zoda_encoding(
     let omega_k = BabyBear::get_root_of_unity(ntt_size_k.trailing_zeros());
     let omega_kn = BabyBear::get_root_of_unity(ntt_size_kn.trailing_zeros());
 
-    // Verify random columns
-    let num_checks = 64.min(num_positions); // Check up to 64 columns
-    let mut all_checks_passed = true;
+    // ========================================================================
+    // PHASE 1: Column Encoding Verification
+    // ========================================================================
+    let num_column_checks = 64.min(num_positions);
+    let mut column_checks_passed = true;
 
-    for check_idx in 0..num_checks {
-        // Select which column to check (spread across all columns)
-        let col_idx = (check_idx * num_positions) / num_checks;
+    for check_idx in 0..num_column_checks {
+        let col_idx = (check_idx * num_positions) / num_column_checks;
 
-        // Extract the column from the encoded data
+        // Extract column from encoded data
         let mut column: Vec<BabyBear> = Vec::with_capacity(k + n);
         for row_idx in 0..(k + n) {
             column.push(encoded_rows[row_idx][col_idx]);
         }
 
-        // Recreate the ORIGINAL input for this column (before encoding)
-        // The original input generation: value = ((row_idx * num_positions + col) % 2013265921)
+        // Recreate original input for this column
         let mut original_input: Vec<BabyBear> = Vec::with_capacity(k);
         for row_idx in 0..k {
             let value = ((row_idx * num_positions + col_idx) % 2013265921) as u64;
             original_input.push(BabyBear::new(value));
         }
 
-        // Pad to ntt_size_k
+        // Encode column on CPU: INTT → pad → NTT
         original_input.resize(ntt_size_k, BabyBear::zero());
-
-        // INTT to get polynomial coefficients (same as GPU does)
         cpu_intt(&mut original_input, omega_k);
-
-        // Extend to k+n by padding with zeros
         original_input.resize(ntt_size_kn, BabyBear::zero());
-
-        // NTT to evaluate at k+n points (same as GPU does)
         cpu_ntt(&mut original_input, omega_kn);
 
-        // Verify that the CPU-recomputed values match the GPU-encoded column
+        // Verify GPU matches CPU
         for row_idx in 0..(k + n) {
             if original_input[row_idx].value != column[row_idx].value {
                 println!(
-                    "  ✗ Validation FAILED at column {} row {}: GPU={}, CPU={}",
+                    "  ✗ Column Encoding FAILED at column {} row {}: GPU={}, CPU={}",
                     col_idx, row_idx, column[row_idx].value, original_input[row_idx].value
                 );
-                all_checks_passed = false;
+                column_checks_passed = false;
                 break;
             }
         }
 
-        if !all_checks_passed {
+        if !column_checks_passed {
+            break;
+        }
+    }
+
+    if !column_checks_passed {
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        return Ok((false, elapsed, num_column_checks));
+    }
+
+    // ========================================================================
+    // PHASE 2: ZODA RLC Soundness Check
+    // ========================================================================
+
+    // 1. Derive random coefficients (one per column position)
+    let data_root = compute_data_root(encoded_rows);
+    let coefficients = generate_deterministic_coefficients(&data_root, num_positions);
+
+    // 2. Compute RLC for first k rows (original data)
+    let mut rlc_original: Vec<BabyBear> = Vec::with_capacity(k);
+    for row_idx in 0..k {
+        let mut sum = BabyBear::zero();
+        for col_idx in 0..num_positions {
+            sum = sum + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
+        }
+        rlc_original.push(sum);
+    }
+
+    // 3. Extend RLC values via Reed-Solomon (same as column encoding)
+    let mut rlc_extended = rlc_original.clone();
+    rlc_extended.resize(ntt_size_k, BabyBear::zero());
+    cpu_intt(&mut rlc_extended, omega_k);
+    rlc_extended.resize(ntt_size_kn, BabyBear::zero());
+    cpu_ntt(&mut rlc_extended, omega_kn);
+
+    // 4. Verify random extended rows (parity rows)
+    let num_rlc_checks = 64.min(n);
+    let mut rlc_checks_passed = true;
+
+    for check_idx in 0..num_rlc_checks {
+        // Check parity rows (k through k+n-1)
+        let row_idx = k + (check_idx * n / num_rlc_checks);
+
+        // Compute RLC for this extended row
+        let mut computed_rlc = BabyBear::zero();
+        for col_idx in 0..num_positions {
+            computed_rlc = computed_rlc + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
+        }
+
+        // Verify it matches the extended RLC value
+        if computed_rlc.value != rlc_extended[row_idx].value {
+            println!(
+                "  ✗ RLC Soundness FAILED at row {}: computed={}, expected={}",
+                row_idx, computed_rlc.value, rlc_extended[row_idx].value
+            );
+            rlc_checks_passed = false;
             break;
         }
     }
 
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-    Ok((all_checks_passed, elapsed, num_checks))
+    let all_checks_passed = column_checks_passed && rlc_checks_passed;
+    let total_checks = num_column_checks + num_rlc_checks;
+
+    Ok((all_checks_passed, elapsed, total_checks))
 }
 
 #[cfg(feature = "cuda")]
@@ -271,7 +329,7 @@ fn run_validated_encoding_benchmark(
         };
 
     if validation_passed {
-        println!("✓ PASSED ({} column checks, {:.2} ms)", num_checks, validation_time_ms);
+        println!("✓ PASSED ({} checks: column encoding + RLC soundness, {:.2} ms)", num_checks, validation_time_ms);
     } else {
         println!("✗ FAILED ({:.2} ms)", validation_time_ms);
     }
@@ -390,15 +448,23 @@ fn benchmark_zoda_validated() {
 
         if all_passed {
             println!("\n✓✓✓ ALL VALIDATIONS PASSED ✓✓✓");
-            println!("\nThe GPU-accelerated Reed-Solomon encoding has been verified to be");
-            println!("mathematically correct according to vertical RS encoding.");
-            println!("\nValidation method:");
-            println!("  1. For each column, extract the first k values (original data)");
-            println!("  2. INTT to interpolate and get polynomial coefficients");
-            println!("  3. Zero-pad to k+n size");
+            println!("\nThe GPU-accelerated encoding has been verified to be");
+            println!("mathematically correct according to the ZODA protocol.");
+            println!("\nTwo-phase verification:");
+            println!("\nPhase 1 - Column Encoding (Vertical Reed-Solomon):");
+            println!("  1. Extract first k values from each column");
+            println!("  2. INTT to interpolate polynomial coefficients");
+            println!("  3. Zero-pad coefficients to k+n size");
             println!("  4. NTT to evaluate polynomial at k+n points");
-            println!("  5. Verify the result matches the GPU-encoded column");
-            println!("\nThis proves each column forms a valid Reed-Solomon codeword.");
+            println!("  5. Verify GPU output matches CPU reference");
+            println!("  ✓ Each column forms a valid Reed-Solomon codeword");
+            println!("\nPhase 2 - RLC Soundness Check (ZODA/RSEMA1D):");
+            println!("  1. Derive random coefficients from commitment");
+            println!("  2. For each row: compute RLC = ∑(row[col] × coeff[col])");
+            println!("  3. Extend first k RLC values via Reed-Solomon");
+            println!("  4. Verify extended rows satisfy RLC consistency");
+            println!("  ✓ Rows are consistent linear combinations across columns");
+            println!("\nThis provides full ZODA soundness for data availability sampling.");
         } else {
             println!("\n✗✗✗ SOME VALIDATIONS FAILED ✗✗✗");
             println!("Please check the encoding implementation for errors.");

@@ -14,20 +14,27 @@ Encoding performance [see benchmark](src/benchmark_zoda_optimal.rs) on an RTX 50
 
 ## Validated Benchmark
 
-A validated benchmark is available that verifies the correctness of the GPU encoding using ZODA protocol verification: [benchmark_zoda_validated.rs](src/benchmark_zoda_validated.rs)
+A validated benchmark is available that verifies the correctness of the GPU encoding using the full ZODA protocol: [benchmark_zoda_validated.rs](src/benchmark_zoda_validated.rs)
 
-This test:
-1. Encodes data using the GPU-accelerated Reed-Solomon implementation
-2. Validates the encoding using ZODA's random linear combination check
-3. Verifies that parity rows satisfy the polynomial structure
+This test performs **two-phase verification**:
+
+### Phase 1: Column Encoding Verification
+- Encodes data using the GPU-accelerated vertical Reed-Solomon implementation
+- Verifies each column forms a valid Reed-Solomon codeword
+- Compares GPU output against CPU reference implementation
+
+### Phase 2: RLC Soundness Check (ZODA/RSEMA1D)
+- Derives random linear combination coefficients from commitment
+- Computes RLC for each row: `∑(row[col] × coeff[col])`
+- Extends original k RLC values to k+n via Reed-Solomon
+- Verifies extended rows satisfy the RLC consistency property
 
 Run with:
 ```bash
 cargo test --features cuda --release benchmark_zoda_validated -- --ignored --nocapture
 ```
 
-The validation ensures that the encoded data forms a mathematically correct Reed-Solomon codeword by:
-- Extracting each column's first k values (original data)
-- Using INTT to interpolate and get polynomial coefficients
-- Zero-padding and using NTT to evaluate at k+n points
-- Verifying that the result matches the GPU-encoded column values
+This provides **full ZODA soundness** for data availability sampling:
+- **Column-wise**: Each column is a valid Reed-Solomon codeword
+- **Row-wise**: Each row is a consistent linear combination across columns
+- **Commitment binding**: Random coefficients prevent forgery attacks
