@@ -247,6 +247,20 @@ fn validate_zoda_encoding(
         rlc_original.push(sum);
     }
 
+    // Debug: Verify first k rows match before extension
+    for row_idx in 0..k.min(4) {
+        let mut computed = BabyBear::zero();
+        for col_idx in 0..num_positions {
+            computed = computed + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
+        }
+        if computed.value != rlc_original[row_idx].value {
+            println!(
+                "  DEBUG: RLC mismatch at original row {}: computed={}, stored={}",
+                row_idx, computed.value, rlc_original[row_idx].value
+            );
+        }
+    }
+
     // 3. Extend RLC values via Reed-Solomon (same as column encoding)
     let mut rlc_extended = rlc_original.clone();
     rlc_extended.resize(ntt_size_k, BabyBear::zero());
@@ -254,15 +268,25 @@ fn validate_zoda_encoding(
     rlc_extended.resize(ntt_size_kn, BabyBear::zero());
     cpu_ntt(&mut rlc_extended, omega_kn);
 
-    // 4. Verify random extended rows (parity rows)
-    let num_rlc_checks = 64.min(n);
+    // Debug: Verify first k values are preserved after extension
+    for row_idx in 0..k.min(4) {
+        if rlc_extended[row_idx].value != rlc_original[row_idx].value {
+            println!(
+                "  DEBUG: Extension changed original row {}: before={}, after={}",
+                row_idx, rlc_original[row_idx].value, rlc_extended[row_idx].value
+            );
+        }
+    }
+
+    // 4. Verify random rows (both original and parity)
+    let num_rlc_checks = 64.min(k + n);
     let mut rlc_checks_passed = true;
 
     for check_idx in 0..num_rlc_checks {
-        // Check parity rows (k through k+n-1)
-        let row_idx = k + (check_idx * n / num_rlc_checks);
+        // Spread checks across all rows (0 through k+n-1)
+        let row_idx = (check_idx * (k + n)) / num_rlc_checks;
 
-        // Compute RLC for this extended row
+        // Compute RLC for this row
         let mut computed_rlc = BabyBear::zero();
         for col_idx in 0..num_positions {
             computed_rlc = computed_rlc + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
@@ -273,6 +297,20 @@ fn validate_zoda_encoding(
             println!(
                 "  ✗ RLC Soundness FAILED at row {}: computed={}, expected={}",
                 row_idx, computed_rlc.value, rlc_extended[row_idx].value
+            );
+            println!(
+                "    First few encoded values: {:?}",
+                &encoded_rows[row_idx][..4.min(num_positions)]
+                    .iter()
+                    .map(|v| v.value)
+                    .collect::<Vec<_>>()
+            );
+            println!(
+                "    First few coefficients: {:?}",
+                &coefficients[..4.min(num_positions)]
+                    .iter()
+                    .map(|v| v.value)
+                    .collect::<Vec<_>>()
             );
             rlc_checks_passed = false;
             break;
