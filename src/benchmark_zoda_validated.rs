@@ -287,12 +287,18 @@ fn validate_zoda_encoding(
     }
 
     // 4. Verify random rows (both original and parity)
+    // IMPORTANT: Only check rows 0..k+n, not the full ntt_size_kn
     let num_rlc_checks = 64.min(k + n);
     let mut rlc_checks_passed = true;
 
     for check_idx in 0..num_rlc_checks {
-        // Spread checks across all rows (0 through k+n-1)
+        // Spread checks across ACTUAL rows (0 through k+n-1), not padded domain
         let row_idx = (check_idx * (k + n)) / num_rlc_checks;
+
+        // Safety check: ensure we're within bounds
+        if row_idx >= k + n {
+            continue;
+        }
 
         // Compute RLC for this row
         let mut computed_rlc = BabyBear::zero();
