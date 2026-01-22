@@ -77,9 +77,9 @@ fn encode_gpu_with_output(
     }
 
     let mut h_output = vec![0u64; total_output_size];
-    let mut d_input = CudaBuffer::<u64>::new(total_input_size)?;
-    let mut d_output = CudaBuffer::<u64>::new(total_output_size)?;
-    let d_work = CudaBuffer::<u64>::new(work_size)?;
+    let mut d_input = CudaBuffer::new(total_input_size)?;
+    let mut d_output = CudaBuffer::new(total_output_size)?;
+    let d_work = CudaBuffer::new(work_size)?;
 
     let start = Instant::now();
 
