@@ -306,49 +306,42 @@ fn benchmark_zoda_optimal() {
                 n: 8192,
                 row_size: 4096,
             },
-
             // 64 MB: k=16384, row_size=4096 → 16384 * 4096 / 1024^2 = 64 MB
             EncodingConfig {
                 k: 16384,
                 n: 16384,
                 row_size: 4096,
             },
-
             // 128 MB: k=32768, row_size=4096 → 32768 * 4096 / 1024^2 = 128 MB
             EncodingConfig {
                 k: 32768,
                 n: 32768,
                 row_size: 4096,
             },
-
             // 256 MB: k=65536, row_size=4096 → 65536 * 4096 / 1024^2 = 256 MB
             EncodingConfig {
                 k: 65536,
                 n: 65536,
                 row_size: 4096,
             },
-
             // 512 MB: k=32768, row_size=16384 → 32768 * 16384 / 1024^2 = 512 MB
             EncodingConfig {
                 k: 32768,
                 n: 32768,
                 row_size: 16384,
             },
-
             // 1 GB: k=32768, row_size=32768 → 32768 * 32768 / 1024^2 = 1024 MB
             EncodingConfig {
                 k: 32768,
                 n: 32768,
                 row_size: 32768,
             },
-
             // 2 GB: k=65536, row_size=32768 → 65536 * 32768 / 1024^2 = 2048 MB
             EncodingConfig {
                 k: 65536,
                 n: 65536,
                 row_size: 32768,
             },
-
             // 3 GB: k=65536, row_size=49152 → 65536 * 49152 / 1024^2 = 3072 MB
             EncodingConfig {
                 k: 65536,

@@ -51,9 +51,7 @@ struct ValidatedEncodingResult {
 
 /// Encode data using GPU and return both the encoded data and timing
 #[cfg(feature = "cuda")]
-fn encode_gpu_with_output(
-    config: &EncodingConfig,
-) -> Result<(Vec<Vec<BabyBear>>, f64), String> {
+fn encode_gpu_with_output(config: &EncodingConfig) -> Result<(Vec<Vec<BabyBear>>, f64), String> {
     let k = config.k;
     let n = config.n;
     let num_positions = config.num_positions();
@@ -117,7 +115,7 @@ fn compute_data_root(encoded_rows: &[Vec<BabyBear>]) -> String {
     let mut hasher = Sha256::new();
     for row in encoded_rows {
         for &value in row {
-            hasher.update(&value.value.to_le_bytes());
+            hasher.update(value.value.to_le_bytes());
         }
     }
     format!("{:x}", hasher.finalize())
@@ -126,15 +124,12 @@ fn compute_data_root(encoded_rows: &[Vec<BabyBear>]) -> String {
 /// Generate deterministic coefficients for random linear combination check
 /// This is the ZODA verification approach
 /// NOTE: In ZODA, coefficients are generated per COLUMN, one for each column position
-fn generate_deterministic_coefficients(
-    data_root: &str,
-    num_columns: usize,
-) -> Vec<BabyBear> {
+fn generate_deterministic_coefficients(data_root: &str, num_columns: usize) -> Vec<BabyBear> {
     (0..num_columns)
         .map(|i| {
             let mut hasher = Sha256::new();
             hasher.update(data_root.as_bytes());
-            hasher.update(&i.to_le_bytes());
+            hasher.update(i.to_le_bytes());
             let digest = hasher.finalize();
             let val = u64::from_be_bytes([
                 digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
@@ -189,10 +184,11 @@ fn validate_zoda_encoding(
         let col_idx = (check_idx * num_positions) / num_column_checks;
 
         // Extract column from encoded data
-        let mut column: Vec<BabyBear> = Vec::with_capacity(k + n);
-        for row_idx in 0..(k + n) {
-            column.push(encoded_rows[row_idx][col_idx]);
-        }
+        let column: Vec<BabyBear> = encoded_rows
+            .iter()
+            .take(k + n)
+            .map(|row| row[col_idx])
+            .collect();
 
         // Recreate original input for this column
         let mut original_input: Vec<BabyBear> = Vec::with_capacity(k);
@@ -240,14 +236,15 @@ fn validate_zoda_encoding(
 
     // 2. Compute RLC for first k rows (original data)
     // Following reference implementation at zoda_babybear.rs:178-184
-    let mut y: Vec<BabyBear> = Vec::with_capacity(k);
-    for row_idx in 0..k {
-        let mut running_sum = BabyBear::zero();
-        for col_idx in 0..num_positions {
-            running_sum = running_sum + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
-        }
-        y.push(running_sum);
-    }
+    let y: Vec<BabyBear> = encoded_rows
+        .iter()
+        .take(k)
+        .map(|row| {
+            row.iter()
+                .zip(coefficients.iter())
+                .fold(BabyBear::zero(), |acc, (&val, &coeff)| acc + (val * coeff))
+        })
+        .collect();
 
     // 3. Extend RLC values via Reed-Solomon
     // Following reference implementation at zoda_babybear.rs:187-203
@@ -275,10 +272,10 @@ fn validate_zoda_encoding(
         let row_idx = (check_idx * max_verifiable_row) / num_rlc_checks;
 
         // Compute RLC for this row
-        let mut running_sum = BabyBear::zero();
-        for col_idx in 0..num_positions {
-            running_sum = running_sum + (encoded_rows[row_idx][col_idx] * coefficients[col_idx]);
-        }
+        let running_sum = encoded_rows[row_idx]
+            .iter()
+            .zip(coefficients.iter())
+            .fold(BabyBear::zero(), |acc, (&val, &coeff)| acc + (val * coeff));
 
         // Check against extended RLC values
         let expected = y_encoded[row_idx];
@@ -300,14 +297,14 @@ fn validate_zoda_encoding(
 }
 
 #[cfg(feature = "cuda")]
-fn run_validated_encoding_benchmark(
-    config: EncodingConfig,
-) -> Option<ValidatedEncodingResult> {
+fn run_validated_encoding_benchmark(config: EncodingConfig) -> Option<ValidatedEncodingResult> {
     let data_size_mb = config.data_size_mb();
 
     println!(
         "  K={} original rows, N={} parity rows → {} total rows",
-        config.k, config.n, config.total_rows()
+        config.k,
+        config.n,
+        config.total_rows()
     );
     println!(
         "  Data volume: {:.1} MB original → {:.1} MB after encoding",
@@ -342,7 +339,10 @@ fn run_validated_encoding_benchmark(
         };
 
     if validation_passed {
-        println!("PASSED ({} checks: column encoding + RLC soundness, {:.2} ms)", num_checks, validation_time_ms);
+        println!(
+            "PASSED ({} checks: column encoding + RLC soundness, {:.2} ms)",
+            num_checks, validation_time_ms
+        );
     } else {
         println!("FAILED ({:.2} ms)", validation_time_ms);
     }
@@ -491,7 +491,10 @@ fn benchmark_zoda_validated() {
                 .sum::<f64>()
                 / results.len() as f64;
 
-            println!("\nValidation overhead: {:.1}% of encoding time", avg_overhead);
+            println!(
+                "\nValidation overhead: {:.1}% of encoding time",
+                avg_overhead
+            );
         }
     }
 }
