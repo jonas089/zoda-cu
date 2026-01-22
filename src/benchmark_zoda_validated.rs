@@ -261,11 +261,19 @@ fn validate_zoda_encoding(
         }
     }
 
-    // 3. Extend RLC values via Reed-Solomon (same as column encoding)
+    // 3. Extend RLC values via Reed-Solomon
+    // The key insight: we're treating the k RLC values as evaluations at
+    // the FIRST k roots of omega_kn, not as evaluations at roots of omega_k!
+    // This is because the rows themselves are evaluation points in the extended domain.
+
+    // So we need to:
+    // 1. Pad k values to ntt_size_kn (the extended domain size)
+    // 2. INTT with omega_kn to get coefficients
+    // 3. NTT with omega_kn to get extended evaluations
+
     let mut rlc_extended = rlc_original.clone();
-    rlc_extended.resize(ntt_size_k, BabyBear::zero());
-    cpu_intt(&mut rlc_extended, omega_k);
     rlc_extended.resize(ntt_size_kn, BabyBear::zero());
+    cpu_intt(&mut rlc_extended, omega_kn);
     cpu_ntt(&mut rlc_extended, omega_kn);
 
     // Debug: Verify first k values are preserved after extension
