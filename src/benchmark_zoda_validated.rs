@@ -211,7 +211,7 @@ fn validate_zoda_encoding(
         for row_idx in 0..(k + n) {
             if original_input[row_idx].value != column[row_idx].value {
                 println!(
-                    "  ✗ Column Encoding FAILED at column {} row {}: GPU={}, CPU={}",
+                    "  Column Encoding FAILED at column {} row {}: GPU={}, CPU={}",
                     col_idx, row_idx, column[row_idx].value, original_input[row_idx].value
                 );
                 column_checks_passed = false;
@@ -284,7 +284,7 @@ fn validate_zoda_encoding(
         let expected = y_encoded[row_idx];
         if running_sum.value != expected.value {
             println!(
-                "  ✗ RLC Soundness FAILED at row {}: computed={}, expected={}",
+                "  RLC Soundness FAILED at row {}: computed={}, expected={}",
                 row_idx, running_sum.value, expected.value
             );
             rlc_checks_passed = false;
@@ -342,9 +342,9 @@ fn run_validated_encoding_benchmark(
         };
 
     if validation_passed {
-        println!("✓ PASSED ({} checks: column encoding + RLC soundness, {:.2} ms)", num_checks, validation_time_ms);
+        println!("PASSED ({} checks: column encoding + RLC soundness, {:.2} ms)", num_checks, validation_time_ms);
     } else {
-        println!("✗ FAILED ({:.2} ms)", validation_time_ms);
+        println!("FAILED ({:.2} ms)", validation_time_ms);
     }
 
     let total_time_ms = gpu_time_ms + validation_time_ms;
@@ -380,7 +380,7 @@ fn benchmark_zoda_validated() {
             return;
         }
 
-        println!("✓ CUDA GPU detected\n");
+        println!("CUDA GPU detected\n");
         println!("Benchmark: Vertical Reed-Solomon encoding WITH ZODA VALIDATION");
         println!("This test encodes data and verifies correctness using ZODA protocol\n");
 
@@ -439,10 +439,10 @@ fn benchmark_zoda_validated() {
         let mut all_passed = true;
         for result in &results {
             let status = if result.validation_passed {
-                "✓ PASS"
+                "PASS"
             } else {
                 all_passed = false;
-                "✗ FAIL"
+                "FAIL"
             };
 
             println!(
@@ -460,7 +460,7 @@ fn benchmark_zoda_validated() {
         println!("{}", "═".repeat(100));
 
         if all_passed {
-            println!("\n✓✓✓ ALL VALIDATIONS PASSED ✓✓✓");
+            println!("\nALL VALIDATIONS PASSED");
             println!("\nThe GPU-accelerated encoding has been verified to be");
             println!("mathematically correct according to the ZODA protocol.");
             println!("\nTwo-phase verification:");
@@ -470,16 +470,16 @@ fn benchmark_zoda_validated() {
             println!("  3. Zero-pad coefficients to k+n size");
             println!("  4. NTT to evaluate polynomial at k+n points");
             println!("  5. Verify GPU output matches CPU reference");
-            println!("  ✓ Each column forms a valid Reed-Solomon codeword");
+            println!("  Each column forms a valid Reed-Solomon codeword");
             println!("\nPhase 2 - RLC Soundness Check (ZODA/RSEMA1D):");
             println!("  1. Derive random coefficients from commitment");
             println!("  2. For each row: compute RLC = ∑(row[col] × coeff[col])");
             println!("  3. Extend first k RLC values via Reed-Solomon");
             println!("  4. Verify extended rows satisfy RLC consistency");
-            println!("  ✓ Rows are consistent linear combinations across columns");
+            println!("  Rows are consistent linear combinations across columns");
             println!("\nThis provides full ZODA soundness for data availability sampling.");
         } else {
-            println!("\n✗✗✗ SOME VALIDATIONS FAILED ✗✗✗");
+            println!("\nSOME VALIDATIONS FAILED");
             println!("Please check the encoding implementation for errors.");
         }
 
