@@ -13,6 +13,9 @@ mod benchmark_zoda_optimal;
 #[cfg(test)]
 mod benchmark_zoda_validated;
 
+#[cfg(test)]
+mod benchmark_zoda_eigenda_comparison;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FieldElem {
