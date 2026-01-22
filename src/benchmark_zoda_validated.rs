@@ -279,6 +279,7 @@ fn validate_zoda_encoding(
         }
     }
 
+    let num_rlc_checks = 64.min(k + n);
     let rlc_checks_passed = if !is_valid_codeword {
         false
     } else {
@@ -287,9 +288,8 @@ fn validate_zoda_encoding(
         cpu_ntt(&mut rlc_reencoded, omega_kn);
 
         let mut passed = true;
-        let num_checks = 64.min(k + n);
-        for check_idx in 0..num_checks {
-            let row_idx = (check_idx * (k + n)) / num_checks;
+        for check_idx in 0..num_rlc_checks {
+            let row_idx = (check_idx * (k + n)) / num_rlc_checks;
             if all_rlc[row_idx].value != rlc_reencoded[row_idx].value {
                 println!(
                     "  RLC Soundness FAILED at row {}: original={}, reencoded={}",
