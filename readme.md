@@ -14,7 +14,7 @@ Direct comparison against [rsema1d](https://github.com/celestiaorg/eigenda-kzg-b
 
 On a single RTX 5090 (32 GB):
 
-| Configuration | K | N | ZODA (ns/op) | ZODA (MB/s) |  EMA (ns/op) |  EMA (MB/s) | Speedup | Status |
+| Configuration | K | N | GPU 1D ZODA (ns/op) | GPU 1D ZODA (MB/s) |  EMA (ns/op) |  EMA (MB/s) | Speedup | Status |
 |---------------|---|---|--------------|-------------|---------------------|--------------------|---------|---------| 
 | 128KB | 1024 | 1024 | 446807 | 279.76 | 885254 | 148.06 | 1.98x | 
 | 128KB | 1024 | 3072 | 301284 | 414.89 | 1537837 | 85.23 | 5.10x | 
