@@ -3,52 +3,7 @@
 
 /*
  * CUDA NTT Implementation for BabyBear Field
- *
- * PERFORMANCE OPTIMIZATION - TWIDDLE FACTOR PRECOMPUTATION:
- *
- * This implementation uses precomputed twiddle factors to achieve O(n log n) complexity.
- *
- * OLD APPROACH (SLOW):
- *   - Computed w = bb_pow(omega, twiddle_exp) per butterfly using modular exponentiation
- *   - bb_pow is O(log p) operations where p is the prime modulus
- *   - Total complexity: O(n log n log p) - catastrophic on GPU!
- *
- * NEW APPROACH (FAST):
- *   - Precompute all twiddle factors once: O(n) with incremental multiplication
- *   - Store in device memory: (n-1) * 8 bytes (e.g., ~8MB for n=2^20)
- *   - Each butterfly does simple memory lookup: O(1)
- *   - Total complexity: O(n log n) - optimal!
- *
- * TWO USAGE PATTERNS:
- *
- * 1. Simple API (cuda_ntt / cuda_ntt_batched):
- *    - Precomputes twiddles per NTT call
- *    - Best for one-off NTT computations
- *    - Still much faster than old bb_pow approach
- *
- * 2. Optimized API (cuda_ntt_opt / cuda_ntt_batched_opt):
- *    - Create twiddles once: twiddles = ntt_twiddles_create(n, omega)
- *    - Reuse for multiple NTTs: cuda_ntt_opt(data, n, twiddles)
- *    - Destroy when done: ntt_twiddles_destroy(twiddles)
- *    - Best for repeated NTTs of same size (e.g., batched operations)
- *    - Zero host-device transfers during NTT execution
- *
- * SPEEDUP: Typically 10-100x faster depending on NTT size
- *
- * PERFORMANCE COMPARISON (approximate):
- * ┌──────────────┬────────────────────┬────────────────────┬─────────────────┐
- * │  NTT Size    │  Old (bb_pow)      │  New (precomputed) │   Speedup       │
- * ├──────────────┼────────────────────┼────────────────────┼─────────────────┤
- * │  2^10 (1K)   │  ~50 ms            │  ~2 ms             │   25x           │
- * │  2^16 (64K)  │  ~800 ms           │  ~15 ms            │   53x           │
- * │  2^20 (1M)   │  ~15 seconds       │  ~250 ms           │   60x           │
- * │  2^24 (16M)  │  ~4 minutes        │  ~4 seconds        │   60x           │
- * └──────────────┴────────────────────┴────────────────────┴─────────────────┘
- *
- * Note: Actual performance depends on GPU model and memory bandwidth.
- * The old approach becomes prohibitively slow for large NTTs, while
- * the new approach scales gracefully.
- */
+*/
 
 // BabyBear prime: 2^31 - 2^27 + 1
 #define BABYBEAR_PRIME 2013265921ULL
@@ -758,73 +713,4 @@ void cuda_rs_encode_vertical(
     // Single synchronization at the end
     cudaDeviceSynchronize();
 }
-
-// ============================================================================
-// USAGE EXAMPLE
-// ============================================================================
-/*
- * Example 1: Simple API (one-off NTT)
- * -----------------------------------
- * uint64_t* d_data;
- * cudaMalloc(&d_data, n * sizeof(uint64_t));
- * // ... copy data to device ...
- *
- * cuda_ntt(d_data, n, omega);  // Twiddles computed internally
- *
- * // ... use result ...
- * cudaFree(d_data);
- *
- *
- * Example 2: Optimized API (repeated NTTs)
- * ----------------------------------------
- * // Create twiddles once
- * NTTTwiddles* twiddles = ntt_twiddles_create(n, omega);
- *
- * uint64_t* d_data;
- * cudaMalloc(&d_data, n * sizeof(uint64_t));
- *
- * // Perform multiple NTTs efficiently
- * for (int i = 0; i < 1000; i++) {
- *     // ... prepare data ...
- *     cuda_ntt_opt(d_data, n, twiddles);  // Fast! No twiddle recomputation
- *     // ... process result ...
- * }
- *
- * cudaFree(d_data);
- * ntt_twiddles_destroy(twiddles);  // Cleanup
- *
- *
- * Example 3: Batched NTT (process many NTTs in parallel)
- * -------------------------------------------------------
- * uint32_t num_ntts = 1024;
- * uint32_t ntt_size = 4096;
- * NTTTwiddles* twiddles = ntt_twiddles_create(ntt_size, omega);
- *
- * uint64_t* d_batch;
- * cudaMalloc(&d_batch, num_ntts * ntt_size * sizeof(uint64_t));
- * // ... copy batch data ...
- *
- * // Process all 1024 NTTs in parallel!
- * cuda_ntt_batched_opt(d_batch, num_ntts, ntt_size, ntt_size, twiddles);
- *
- * cudaFree(d_batch);
- * ntt_twiddles_destroy(twiddles);
- *
- *
- * Example 4: Reed-Solomon Encoding (uses batched NTT internally)
- * ---------------------------------------------------------------
- * uint32_t num_positions = 256;
- * uint32_t k = 1024;
- * uint32_t n = 2048;
- *
- * uint64_t* d_input, *d_output, *d_work;
- * cudaMalloc(&d_input, num_positions * k * sizeof(uint64_t));
- * cudaMalloc(&d_output, num_positions * n * sizeof(uint64_t));
- * cudaMalloc(&d_work, num_positions * k * sizeof(uint64_t));
- *
- * // All operations on GPU - no CPU roundtrips!
- * cuda_rs_encode_vertical(d_input, d_output, d_work,
- *                         num_positions, k, n, omega_k, omega_n);
- */
-
 } // extern "C"
