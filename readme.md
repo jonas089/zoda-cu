@@ -1,4 +1,4 @@
-## CUDA + ZODA = SPEED at SCALE
+## Cuda accelerated ZODA experiment
 This is a CUDA accelerated implementation of ZODA that leverages prime field arithmetic over u64 BABYBEAR fields.
 
 Full ZODA encoding test with y-column verification:
