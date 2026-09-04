@@ -9,17 +9,16 @@ Full ZODA encoding test with y-column verification:
 
 ## Kernel status
 
-`cuda/ntt_kernel.cu` is currently a deliberately minimal baseline: a single radix-2 NTT / INTT over
-`u32` BabyBear elements, one global-memory kernel launch per stage, twiddles precomputed on the host.
-Multiplication is Montgomery (R = 2^32) with the parameters derived at runtime in `mont_params()`;
-values are converted into Montgomery form on entry and back to canonical form on exit, so the Rust
-interface only ever sees canonical values. There is no batching or shared memory yet; it exists as a
-clean starting point for those optimisations and mirrors the CPU reference in `src/ntt/cpu.rs`.
+`cuda/ntt_kernel.cu` transforms every column of a row-major `[n rows][cols]` square in one call.
+It mirrors the radix-2 CPU reference in `src/ntt/cpu.rs`: bit reversal, then one kernel launch per
+stage, with one thread per butterfly per column. Field elements are `u32` BabyBear in Montgomery
+form on the device and canonical on the Rust side. Columns are processed in chunks that rotate over
+three streams so uploads and downloads overlap the kernels.
 
 ## Benchmark Results
 
-> The numbers below were measured with the earlier batched kernel and do **not** reflect the current
-> minimal baseline, which encodes one column at a time.
+> The numbers below were measured with an earlier `u64` kernel and have not yet been re-run with the
+> current one.
 
 cargo test benchmark_zoda_eigenda_comparison --features cuda --release -- --ignored --nocapture
 

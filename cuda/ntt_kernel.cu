@@ -70,19 +70,20 @@ __global__ void bit_reverse_kernel(uint32_t* coeffs, uint32_t cols, uint32_t tot
 // ---- one stage. CPU: the body of `while len <= n` ---------------------------
 // The CPU visits the n/2 butterflies of a stage as (block, j) pairs:
 //     for block in coeffs.chunks_mut(len), for j in 0..half
-//     lo = block * len + j,  hi = lo + half
+//     even_row = block * len + j,  odd_row = even_row + half
 // blockIdx.y counts those pairs; the thread index picks the column.
 
-struct Butterfly { uint32_t lo, hi, j; };
+// Rows of the even (E[j], the CPU's lo[j]) and odd (O[j], the CPU's hi[j]) half of one butterfly.
+struct Butterfly { uint32_t even_row, odd_row, j; };
 
 __device__ inline Butterfly butterfly_rows(uint32_t b, uint32_t len) {
     uint32_t half  = len / 2;
     uint32_t block = b / half;
     uint32_t j     = b % half;
     Butterfly bf;
-    bf.lo = block * len + j;
-    bf.hi = bf.lo + half;
-    bf.j  = j;
+    bf.even_row = block * len + j;
+    bf.odd_row  = bf.even_row + half;
+    bf.j        = j;
     return bf;
 }
 
@@ -94,14 +95,14 @@ __global__ void ntt_stage(uint32_t* coeffs, uint32_t cols, uint32_t n, uint32_t 
     Butterfly bf = butterfly_rows(blockIdx.y, len);
     uint32_t stride = n / len;
 
-    uint32_t* lo = &coeffs[idx(bf.lo, col, cols)];   // CPU: lo[j]
-    uint32_t* hi = &coeffs[idx(bf.hi, col, cols)];   // CPU: hi[j]
+    uint32_t* even = &coeffs[idx(bf.even_row, col, cols)];   // CPU: lo[j], holds E[j]
+    uint32_t* odd  = &coeffs[idx(bf.odd_row,  col, cols)];   // CPU: hi[j], holds O[j]
 
-    uint32_t w = roots[bf.j * stride];               // CPU: let w = roots[j*stride];
-    uint32_t a = *lo;                                // CPU: let a = lo[j];
-    uint32_t b = mont_mul(*hi, w);                   // CPU: let b = hi[j] * w % modulus;
-    *lo = bb_add(a, b);                              // CPU: lo[j] = (a + b) % modulus;
-    *hi = bb_sub(a, b);                              // CPU: hi[j] = (a + modulus - b) % modulus;
+    uint32_t w     = roots[bf.j * stride];                   // CPU: let w = roots[j*stride];
+    uint32_t e     = *even;                                  // CPU: let a = lo[j];           E[j]
+    uint32_t w_odd = mont_mul(*odd, w);                      // CPU: let b = hi[j] * w;       w * O[j]
+    *even = bb_add(e, w_odd);                                // CPU: lo[j] = a + b;           E[j] + w*O[j]
+    *odd  = bb_sub(e, w_odd);                                // CPU: hi[j] = a - b;           E[j] - w*O[j]
 }
 
 // ---- entry points -------------------------------------------------------------
