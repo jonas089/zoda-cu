@@ -59,7 +59,7 @@ impl PinnedSquare {
 
     pub fn set(&mut self, row: usize, col: usize, value: BabyBear) {
         let i = col * self.rows + row;
-        self[i] = value.value as u32;
+        self[i] = value.value;
     }
 
     pub fn get(&self, row: usize, col: usize) -> BabyBear {
@@ -142,7 +142,7 @@ mod tests {
     fn one_poly(values: &[BabyBear]) -> PinnedSquare {
         let mut sq = PinnedSquare::new(values.len(), 1).unwrap();
         for (i, v) in values.iter().enumerate() {
-            sq[i] = v.value as u32;
+            sq[i] = v.value;
         }
         sq
     }
@@ -158,7 +158,7 @@ mod tests {
             ntt_cuda(&mut gpu_values, n, n).unwrap();
 
             for (i, c) in cpu_values.iter().enumerate() {
-                assert_eq!(c.value, gpu_values[i] as u64, "n={n}: mismatch at {i}");
+                assert_eq!(c.value, gpu_values[i], "n={n}: mismatch at {i}");
             }
         }
     }
@@ -174,7 +174,7 @@ mod tests {
             intt_cuda(&mut gpu_values, n, n).unwrap();
 
             for (i, c) in cpu_values.iter().enumerate() {
-                assert_eq!(c.value, gpu_values[i] as u64, "n={n}: mismatch at {i}");
+                assert_eq!(c.value, gpu_values[i], "n={n}: mismatch at {i}");
             }
         }
     }
@@ -187,7 +187,7 @@ mod tests {
         ntt_cuda(&mut values, n, n).unwrap();
         intt_cuda(&mut values, n, n).unwrap();
         for (i, o) in original.iter().enumerate() {
-            assert_eq!(o.value, values[i] as u64, "roundtrip failed at {i}");
+            assert_eq!(o.value, values[i], "roundtrip failed at {i}");
         }
     }
 
@@ -230,7 +230,7 @@ mod tests {
             let mut cpu: Vec<BabyBear> = (0..n).map(|row| BabyBear::new(before[col * stride + row] as u64)).collect();
             cpu_ntt(&mut cpu);
             for row in 0..stride {
-                let expect = if row < n { cpu[row].value } else { before[col * stride + row] as u64 };
+                let expect = if row < n { cpu[row].value } else { before[col * stride + row] };
                 assert_eq!(expect, square.get(row, col).value, "col={col} row={row}");
             }
         }

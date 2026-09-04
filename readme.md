@@ -5,8 +5,6 @@ Full ZODA encoding test with y-column verification:
 
 `cargo test test_zoda_babybear_gpu --features cuda --release -- --nocapture`
 
-> **⚠️ Security Notice**: This is a proof-of-concept implementation using the BabyBear field (p = 2^31 - 2^27 + 1), which provides ~31 bits of security. This is **NOT cryptographically secure** for production use. For production data availability systems, a larger field is required (e.g., Goldilocks p = 2^64 - 2^32 + 1 for 64-bit security, or a 128-bit field for full cryptographic security). The encoding is mathematically correct and performance characteristics would scale similarly to larger fields.
-
 ## Kernel status
 
 `cuda/ntt_kernel.cu` transforms every column of a row-major `[n rows][cols]` square in one call.
@@ -17,8 +15,16 @@ three streams so uploads and downloads overlap the kernels.
 
 ## Benchmark Results
 
-> The numbers below were measured with an earlier `u64` kernel and have not yet been re-run with the
-> current one.
+> The numbers below were measured with an earlier `u64` kernel, an un-batched one-column-per-call
+> code path, and a stopwatch that also covered generating the synthetic input. They have not yet been
+> re-run with the current kernel.
+>
+> The benchmark now reports two times per configuration. `encode` is the end-to-end number: input
+> already in host memory, transpose into the pinned column-major buffer, zero padding, INTT + NTT on
+> the GPU with their copies, encoded square back in host memory. `GPU xform` is the two transform
+> calls alone. Each configuration gets one untimed warm-up and the median of `ZODA_BENCH_ITERS`
+> (default 3) timed encodes. MB/s is input bytes per second of `encode`. The EigenDA column was
+> measured on different hardware with a different pipeline, so the ratio is indicative only.
 
 cargo test benchmark_zoda_eigenda_comparison --features cuda --release -- --ignored --nocapture
 

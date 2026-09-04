@@ -8,10 +8,20 @@ use crate::ntt::cuda::cuda_available;
 
 struct BenchmarkResult {
     config: EncodingConfig,
+    /// End-to-end encode, median of the timed runs. See `EncodeTiming`.
     encode_time_ns: u64,
+    /// The two GPU transform calls inside that encode.
+    transform_time_ns: u64,
+    /// Input MB per second of end-to-end encode time.
     throughput_mbs: f64,
     validation_passed: bool,
 }
+
+/// What each side of the comparison measures, printed above every table so the
+/// numbers are not read as more than they are.
+const METHODOLOGY: &str = "ZODA times are the median of several end-to-end encodes after one untimed warm-up. An encode starts with the row-major input already in host memory and ends with the encoded square in host memory: transpose into the pinned column-major buffer, zero padding, INTT + NTT on the GPU with their uploads and downloads, and the per-call device setup. Generating the input and the correctness validation are not timed. `GPU xform` is the GPU transform calls alone; the rest of `encode` is host-side layout work. MB/s is input bytes (k * row_size) per second of `encode`; the input is counted at 4 bytes per 31-bit BabyBear element, so real payload is slightly less.
+
+EigenDA EMA figures are copied from celestiaorg/eigenda-kzg-bench and were measured on different hardware, in Go, over the BN254 scalar field with the encoder's own pipeline. `Ratio` is EigenDA ns / ZODA encode ns and compares two different pipelines on two different machines; it is a rough indication, not a controlled speedup.";
 
 // EigenDA EMA benchmark reference results from celestiaorg/eigenda-kzg-bench
 fn get_eigenda_reference(data_mb: f64, k: usize, n: usize) -> Option<(u64, f64)> {
@@ -49,10 +59,11 @@ fn get_eigenda_reference(data_mb: f64, k: usize, n: usize) -> Option<(u64, f64)>
 #[cfg(feature = "cuda")]
 fn run_benchmark(config: EncodingConfig) -> Option<BenchmarkResult> {
     // Encode on GPU and measure time
-    let (encoded_rows, encode_time_ns) = match encode_gpu_with_output(&config) {
+    let (encoded_rows, timing) = match encode_gpu_with_output(&config) {
         Ok(result) => result,
         Err(_) => return None,
     };
+    let encode_time_ns = timing.encode_ns;
 
     // Validate correctness (not timed in benchmark)
     let validation_passed = match validate_zoda_encoding(&config, &encoded_rows) {
@@ -67,6 +78,7 @@ fn run_benchmark(config: EncodingConfig) -> Option<BenchmarkResult> {
     Some(BenchmarkResult {
         config,
         encode_time_ns,
+        transform_time_ns: timing.transform_ns,
         throughput_mbs,
         validation_passed,
     })
@@ -343,7 +355,10 @@ fn benchmark_zoda_eigenda_comparison() {
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
             if let Some(result) = run_benchmark(config.clone()) {
-                println!("✓ {:.2} MB/s", result.throughput_mbs);
+                println!(
+                    "✓ {:.2} MB/s (encode {} ns, of which GPU xform {} ns)",
+                    result.throughput_mbs, result.encode_time_ns, result.transform_time_ns
+                );
                 results.push(result);
             } else {
                 println!("✗ FAILED");
@@ -354,15 +369,20 @@ fn benchmark_zoda_eigenda_comparison() {
         println!("\nWriting results to files...");
 
         // Write Markdown table
-        if let Ok(mut md_file) = File::create("zoda_eigenda_benchmark.md") {
+        let md_path = "bench/zoda_eigenda_benchmark.md";
+        if let Ok(mut md_file) = File::create(md_path) {
             writeln!(md_file, "# ZODA Encoding Benchmark Results\n").ok();
+            writeln!(md_file, "## What is measured\n").ok();
+            for paragraph in METHODOLOGY.split("\n\n") {
+                writeln!(md_file, "{}\n", paragraph).ok();
+            }
             writeln!(
                 md_file,
                 "## Performance Comparison: ZODA vs EigenDA EMA Encoding\n"
             )
             .ok();
-            writeln!(md_file, "| Configuration | K | N | ZODA (ns/op) | ZODA (MB/s) | EigenDA EMA (ns/op) | EigenDA EMA (MB/s) | Speedup | Status |").ok();
-            writeln!(md_file, "|---------------|---|---|--------------|-------------|---------------------|--------------------|---------|---------| ").ok();
+            writeln!(md_file, "| Configuration | K | N | ZODA encode (ns) | ZODA GPU xform (ns) | ZODA (MB/s) | EigenDA EMA (ns/op) | EigenDA EMA (MB/s) | Ratio | Status |").ok();
+            writeln!(md_file, "|---------------|---|---|------------------|---------------------|-------------|---------------------|--------------------|-------|--------|").ok();
 
             for result in &results {
                 let data_label = if result.config.data_size_kb() < 1024.0 {
@@ -394,11 +414,12 @@ fn benchmark_zoda_eigenda_comparison() {
 
                 writeln!(
                     md_file,
-                    "| {} | {} | {} | {} | {:.2} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | {} | {} | {:.2} | {} | {} | {} | {} |",
                     data_label,
                     result.config.k,
                     result.config.n,
                     result.encode_time_ns,
+                    result.transform_time_ns,
                     result.throughput_mbs,
                     eigenda_time,
                     eigenda_throughput,
@@ -511,39 +532,42 @@ fn benchmark_zoda_eigenda_comparison() {
                     let min_speedup = speedups.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                     let max_speedup = speedups.iter().fold(0.0f64, |a, &b| a.max(b));
 
-                    writeln!(md_file, "\n## Speedup vs EigenDA EMA\n").ok();
+                    writeln!(md_file, "\n## Ratio vs EigenDA EMA reference\n").ok();
                     writeln!(
                         md_file,
-                        "Based on {} comparable configurations:\n",
+                        "EigenDA ns / ZODA encode ns over {} configurations that exist on both sides. \
+                         Different hardware and pipelines, see \"What is measured\".\n",
                         speedups.len()
                     )
                     .ok();
-                    writeln!(md_file, "- **Average Speedup**: {:.2}x", avg_speedup).ok();
-                    writeln!(md_file, "- **Minimum Speedup**: {:.2}x", min_speedup).ok();
-                    writeln!(md_file, "- **Maximum Speedup**: {:.2}x", max_speedup).ok();
+                    writeln!(md_file, "- **Average Ratio**: {:.2}x", avg_speedup).ok();
+                    writeln!(md_file, "- **Minimum Ratio**: {:.2}x", min_speedup).ok();
+                    writeln!(md_file, "- **Maximum Ratio**: {:.2}x", max_speedup).ok();
                 }
             }
 
-            println!("  ✓ Markdown results written to: zoda_eigenda_benchmark.md");
+            println!("  ✓ Markdown results written to: {}", md_path);
         }
 
         // Print results table matching EigenDA format
-        println!("\n{}", "═".repeat(130));
+        println!("\n{}", "═".repeat(145));
         println!("Performance Comparison: ZODA vs EigenDA EMA Encoding");
-        println!("{}", "═".repeat(130));
+        println!("{}", "═".repeat(145));
+        println!("{}\n", METHODOLOGY);
         println!(
-            "{:<15} {:<6} {:<6} │ {:<12} {:<10} │ {:<12} {:<10} │ {:<10} {:<10}",
+            "{:<15} {:<6} {:<6} │ {:<12} {:<12} {:<10} │ {:<12} {:<10} │ {:<10} {:<10}",
             "Config",
             "k",
             "n",
-            "ZODA (ns)",
+            "encode (ns)",
+            "GPU xform",
             "ZODA MB/s",
             "EMA (ns)",
             "EMA MB/s",
-            "Speedup",
+            "Ratio",
             "Status"
         );
-        println!("{}", "─".repeat(130));
+        println!("{}", "─".repeat(145));
 
         let mut all_passed = true;
         for result in &results {
@@ -577,11 +601,12 @@ fn benchmark_zoda_eigenda_comparison() {
                 };
 
             println!(
-                "{:<15} {:<6} {:<6} │ {:<12} {:<10.2} │ {:<12} {:<10} │ {:<10} {}",
+                "{:<15} {:<6} {:<6} │ {:<12} {:<12} {:<10.2} │ {:<12} {:<10} │ {:<10} {}",
                 data_label,
                 result.config.k,
                 result.config.n,
                 result.encode_time_ns,
+                result.transform_time_ns,
                 result.throughput_mbs,
                 eigenda_time_str,
                 eigenda_throughput_str,
@@ -590,7 +615,7 @@ fn benchmark_zoda_eigenda_comparison() {
             );
         }
 
-        println!("{}", "═".repeat(130));
+        println!("{}", "═".repeat(145));
 
         if all_passed {
             println!("\n✓ All validations PASSED");
@@ -617,7 +642,7 @@ fn benchmark_zoda_eigenda_comparison() {
             let max_speedup = speedups.iter().fold(0.0f64, |a, &b| a.max(b));
 
             println!(
-                "\nSpeedup vs EigenDA EMA ({} comparable configs):",
+                "\nRatio vs EigenDA EMA reference ({} comparable configs, different hardware):",
                 speedups.len()
             );
             println!("  Average: {:.2}x", avg_speedup);

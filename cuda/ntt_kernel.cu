@@ -138,13 +138,34 @@ static cudaError_t ntt_all_polys(uint32_t* values, const uint32_t* roots, uint32
         dim3 per_value(blocks_for(n), w);        // x covers positions 0..n, y is the polynomial
         dim3 per_butterfly(blocks_for(n / 2), w); // x covers butterflies 0..n/2, y is the polynomial
 
+        // The whole NTT for this chunk, as a sequence of kernel launches on stream
+        // `st`. Launches on one stream run in order, so each step sees the previous
+        // step's output; nothing here waits on the host. Every launch works on all
+        // w polynomials of the chunk at once (the y dimension of the grid).
+
+        // 1. Convert every value to Montgomery form (x -> x * 2^32 mod P) so the
+        //    butterflies can use mont_mul. Flat over all n*w values.
         to_mont_kernel<<<blocks_for(total), THREADS, 0, st>>>(coeffs, total);
+
+        // 2. Bit-reverse permutation of each polynomial's n positions.
+        //    CPU: `let mut coeffs = reverse(values);`
         bit_reverse_kernel<<<per_value, THREADS, 0, st>>>(coeffs, n, log_n);
+
+        // 3. The log2(n) butterfly stages, one launch each, len = 2, 4, ..., n.
+        //    Each stage reads and writes the whole polynomial, so consecutive
+        //    stages must be separate launches: the kernel boundary is the global
+        //    barrier between them. CPU: the `while len <= n` loop.
         for (uint32_t len = 2; len <= n; len *= 2) {
             ntt_stage<<<per_butterfly, THREADS, 0, st>>>(coeffs, n, len, d_roots);
         }
+
+        // 4. Leave Montgomery form and apply `scale` (1 for ntt, n^-1 for intt).
         from_mont_kernel<<<blocks_for(total), THREADS, 0, st>>>(coeffs, total, scale);
 
+        // 5. Copy the transformed chunk back into place in `values`. Same 2D copy
+        //    as the upload with source and destination swapped: device rows are n
+        //    apart, host rows are `stride` apart. Queued on `st`, so it runs after
+        //    step 4 and overlaps with the next chunk's work on another stream.
         cudaMemcpy2DAsync(host, (size_t)stride * sizeof(uint32_t), coeffs, poly_bytes,
                           poly_bytes, w, cudaMemcpyDeviceToHost, st);
     }

@@ -6,6 +6,9 @@ use crate::ntt::cuda::cuda_available;
 
 struct ValidatedEncodingResult {
     config: EncodingConfig,
+    /// End-to-end encode (host layout work + GPU), median of the timed runs.
+    encode_time_ms: f64,
+    /// The GPU transform calls alone.
     gpu_time_ms: f64,
     validation_time_ms: f64,
     total_time_ms: f64,
@@ -29,19 +32,20 @@ fn run_validated_encoding_benchmark(config: EncodingConfig) -> Option<ValidatedE
         data_size_mb * config.total_rows() as f64 / config.k as f64
     );
 
-    // GPU encoding
-    print!("  GPU encoding (batched+fused)... ");
+    // GPU encoding: median end-to-end encode after a warm-up, see utils::EncodeTiming.
+    print!("  GPU encoding (batched)... ");
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
-    let (encoded_rows, gpu_time_ns) = match encode_gpu_with_output(&config) {
+    let (encoded_rows, timing) = match encode_gpu_with_output(&config) {
         Ok(result) => result,
         Err(e) => {
             println!("ERROR: {}", e);
             return None;
         }
     };
-    let gpu_time_ms = gpu_time_ns as f64 / 1_000_000.0;
-    println!("{:.2} ms", gpu_time_ms);
+    let encode_time_ms = timing.encode_ns as f64 / 1_000_000.0;
+    let gpu_time_ms = timing.transform_ns as f64 / 1_000_000.0;
+    println!("{:.2} ms end-to-end, of which {:.2} ms GPU transforms", encode_time_ms, gpu_time_ms);
 
     // ZODA validation
     print!("  Validating encoding (ZODA verification)... ");
@@ -65,10 +69,11 @@ fn run_validated_encoding_benchmark(config: EncodingConfig) -> Option<ValidatedE
         println!("FAILED ({:.2} ms)", validation_time_ms);
     }
 
-    let total_time_ms = gpu_time_ms + validation_time_ms;
+    let total_time_ms = encode_time_ms + validation_time_ms;
 
     Some(ValidatedEncodingResult {
         config,
+        encode_time_ms,
         gpu_time_ms,
         validation_time_ms,
         total_time_ms,
@@ -139,8 +144,8 @@ fn benchmark_zoda_validated() {
         println!("SUMMARY - GPU Encoding + ZODA Validation");
         println!("{}", "═".repeat(100));
         println!(
-            "{:<12} {:<10} {:<10} │ {:<12} {:<12} {:<12} │ {:<10}",
-            "Data MB", "K", "N", "GPU (ms)", "Valid (ms)", "Total (ms)", "Status"
+            "{:<12} {:<10} {:<10} │ {:<12} {:<12} {:<12} {:<12} │ {:<10}",
+            "Data MB", "K", "N", "Encode (ms)", "GPU (ms)", "Valid (ms)", "Total (ms)", "Status"
         );
         println!("{}", "─".repeat(100));
 
@@ -154,10 +159,11 @@ fn benchmark_zoda_validated() {
             };
 
             println!(
-                "{:<12.1} {:<10} {:<10} │ {:<12.2} {:<12.2} {:<12.2} │ {}",
+                "{:<12.1} {:<10} {:<10} │ {:<12.2} {:<12.2} {:<12.2} {:<12.2} │ {}",
                 result.config.data_size_mb(),
                 result.config.k,
                 result.config.n,
+                result.encode_time_ms,
                 result.gpu_time_ms,
                 result.validation_time_ms,
                 result.total_time_ms,
@@ -194,7 +200,7 @@ fn benchmark_zoda_validated() {
         if !results.is_empty() {
             let avg_overhead = results
                 .iter()
-                .map(|r| (r.validation_time_ms / r.gpu_time_ms) * 100.0)
+                .map(|r| (r.validation_time_ms / r.encode_time_ms) * 100.0)
                 .sum::<f64>()
                 / results.len() as f64;
 
