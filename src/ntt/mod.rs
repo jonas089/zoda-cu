@@ -12,4 +12,4 @@ pub mod cuda;
 pub use cpu::{intt, intt_babybear, ntt, ntt_babybear, roots_of_unity};
 
 #[cfg(feature = "cuda")]
-pub use cuda::{cuda_available, intt_cuda, ntt_cuda};
+pub use cuda::{cuda_available, intt_cuda, ntt_cuda, PinnedSquare};

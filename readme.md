@@ -1,5 +1,5 @@
 ## Cuda accelerated ZODA experiment
-This is a CUDA accelerated implementation of ZODA that leverages prime field arithmetic over u64 BABYBEAR fields.
+This is a CUDA accelerated implementation of ZODA that leverages prime field arithmetic over the u32 BabyBear field.
 
 Full ZODA encoding test with y-column verification:
 

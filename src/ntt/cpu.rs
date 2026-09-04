@@ -127,16 +127,16 @@ fn roundtrip(){
 
 use crate::field::babybear::BabyBear;
 
-const P: u32 = crate::field::babybear::BABYBEAR_PRIME as u32;
+const P: u32 = crate::field::babybear::BABYBEAR_PRIME;
 
 /// Forward NTT in place over BabyBear. Length must be a power of two.
 pub fn ntt_babybear(values: &mut [BabyBear]) {
     let n = values.len();
     assert!(n.is_power_of_two(), "NTT size must be power of 2");
-    let raw: Vec<u32> = values.iter().map(|v| v.value as u32).collect();
+    let raw: Vec<u32> = values.iter().map(|v| v.value).collect();
     let out = ntt(raw, roots_of_unity(n as u32, P), P);
     for (v, r) in values.iter_mut().zip(out) {
-        *v = BabyBear::new(r as u64);
+        *v = BabyBear { value: r };
     }
 }
 
@@ -144,10 +144,10 @@ pub fn ntt_babybear(values: &mut [BabyBear]) {
 pub fn intt_babybear(values: &mut [BabyBear]) {
     let n = values.len();
     assert!(n.is_power_of_two(), "NTT size must be power of 2");
-    let raw: Vec<u32> = values.iter().map(|v| v.value as u32).collect();
+    let raw: Vec<u32> = values.iter().map(|v| v.value).collect();
     let out = intt(raw, roots_of_unity(n as u32, P), P);
     for (v, r) in values.iter_mut().zip(out) {
-        *v = BabyBear::new(r as u64);
+        *v = BabyBear { value: r };
     }
 }
 

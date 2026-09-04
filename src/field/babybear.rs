@@ -1,23 +1,24 @@
 // BabyBear field: p = 2^31 - 2^27 + 1 = 2013265921
 //
-// Values are kept in canonical form (0 <= value < p). This is the CPU-side
-// type; the GPU kernel works on the raw u32 representation.
+// Values are kept in canonical form (0 <= value < p), which fits in a u32.
+// The struct is repr(C) with a single u32, so a slice of BabyBear has the same
+// memory layout as a slice of u32 and can be handed to the GPU as is.
 
 use std::ops::{Add, Mul, Sub};
 
-pub const BABYBEAR_PRIME: u64 = 2013265921; // 2^31 - 2^27 + 1
+pub const BABYBEAR_PRIME: u32 = 2013265921; // 2^31 - 2^27 + 1
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub struct BabyBear {
-    pub value: u64,
+    pub value: u32,
 }
 
 impl BabyBear {
     #[inline]
     pub fn new(value: u64) -> Self {
         Self {
-            value: value % BABYBEAR_PRIME,
+            value: (value % BABYBEAR_PRIME as u64) as u32,
         }
     }
 
@@ -32,7 +33,7 @@ impl BabyBear {
     }
 
     #[inline]
-    pub fn to_bytes(&self) -> [u8; 8] {
+    pub fn to_bytes(&self) -> [u8; 4] {
         self.value.to_le_bytes()
     }
 }
@@ -42,7 +43,7 @@ impl Add for BabyBear {
 
     #[inline]
     fn add(self, rhs: Self) -> Self {
-        // Both operands are < p, so one conditional subtraction reduces the sum.
+        // Both operands are < 2^31, so the sum fits in u32 and one conditional subtraction reduces it.
         let sum = self.value + rhs.value;
         Self {
             value: if sum >= BABYBEAR_PRIME { sum - BABYBEAR_PRIME } else { sum },
@@ -71,7 +72,7 @@ impl Mul for BabyBear {
     fn mul(self, rhs: Self) -> Self {
         // Both operands are < 2^31, so the product fits in u64.
         Self {
-            value: (self.value * rhs.value) % BABYBEAR_PRIME,
+            value: ((self.value as u64 * rhs.value as u64) % BABYBEAR_PRIME as u64) as u32,
         }
     }
 }
@@ -93,13 +94,13 @@ mod tests {
 
     #[test]
     fn test_modular_reduction() {
-        assert_eq!(BabyBear::new(BABYBEAR_PRIME + 5).value, 5);
-        assert_eq!((BabyBear::new(BABYBEAR_PRIME - 1) + BabyBear::one()).value, 0);
+        assert_eq!(BabyBear::new(BABYBEAR_PRIME as u64 + 5).value, 5);
+        assert_eq!((BabyBear::new(BABYBEAR_PRIME as u64 - 1) + BabyBear::one()).value, 0);
     }
 
     #[test]
     fn test_mul_wraps() {
-        let a = BabyBear::new(BABYBEAR_PRIME - 1); // -1
+        let a = BabyBear::new(BABYBEAR_PRIME as u64 - 1); // -1
         assert_eq!((a * a).value, 1);
     }
 }

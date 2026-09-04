@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::time::Instant;
 
 #[cfg(feature = "cuda")]
-use crate::ntt::cuda::{intt_cuda, ntt_cuda};
+use crate::ntt::cuda::{intt_cuda, ntt_cuda, PinnedSquare};
 
 #[derive(Debug, Clone)]
 pub struct EncodingConfig {
@@ -83,28 +83,24 @@ pub fn encode_gpu_with_output(
     let ntt_size_k = config.ntt_size_k();
     let ntt_size_kn = config.ntt_size_kn();
 
-    // All columns side by side, row-major: square[row * cols + col].
-    // Each column is INTT'd, zero-padded, and NTT'd by one GPU call over the whole square.
-    let mut square = vec![BabyBear::zero(); ntt_size_k * cols];
+    // All columns side by side in one pinned square with ntt_size_kn rows.
+    // Rows k.. are zero, which is the padding for the forward transform.
+    let mut square = PinnedSquare::new(ntt_size_kn, cols)?;
 
     let start = Instant::now();
 
     for row in 0..k {
         for col in 0..cols {
-            square[row * cols + col] = BabyBear::new(((row * cols + col) % 2013265921) as u64);
+            square[row * cols + col] = BabyBear::new((row * cols + col) as u64);
         }
     }
 
-    intt_cuda(&mut square, cols)?;
-    // Zero-padding every column to ntt_size_kn is appending zero rows.
-    square.resize(ntt_size_kn * cols, BabyBear::zero());
-    ntt_cuda(&mut square, cols)?;
+    intt_cuda(&mut square[..ntt_size_k * cols], cols)?;   // the first ntt_size_k rows
+    ntt_cuda(&mut square, cols)?;                          // all ntt_size_kn rows
 
     let elapsed_ns = start.elapsed().as_nanos() as u64;
 
-    let encoded_rows: Vec<Vec<BabyBear>> = (0..(k + n))
-        .map(|row| square[row * cols..(row + 1) * cols].to_vec())
-        .collect();
+    let encoded_rows: Vec<Vec<BabyBear>> = (0..(k + n)).map(|row| square.row(row).to_vec()).collect();
 
     Ok((encoded_rows, elapsed_ns))
 }

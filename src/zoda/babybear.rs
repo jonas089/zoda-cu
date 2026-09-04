@@ -7,7 +7,24 @@ use sha2::{Digest, Sha256};
 use std::cmp::max;
 
 #[cfg(feature = "cuda")]
-use crate::ntt::cuda::{cuda_available, intt_cuda, ntt_cuda};
+use crate::ntt::cuda::{cuda_available, intt_cuda, ntt_cuda, PinnedSquare};
+
+/// GPU transform of polynomials laid end to end, each `n` long, in place.
+#[cfg(feature = "cuda")]
+fn gpu_transform(values: &mut [BabyBear], n: usize, inverse: bool) {
+    let mut square = PinnedSquare::new(n, values.len() / n).expect("pinned alloc failed");
+    for (i, v) in values.iter().enumerate() {
+        square[i] = v.value as u32;
+    }
+    if inverse {
+        intt_cuda(&mut square, n, n).expect("CUDA INTT failed");
+    } else {
+        ntt_cuda(&mut square, n, n).expect("CUDA NTT failed");
+    }
+    for (v, r) in values.iter_mut().zip(square.iter()) {
+        *v = BabyBear::new(*r as u64);
+    }
+}
 
 /// Data cell in the square
 #[derive(Clone)]
@@ -102,35 +119,32 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
     let ntt_n = data_square.rows.next_power_of_two();
     let cols = data_square.columns;
 
-    // All columns side by side, row-major: square[row * cols + col], zero-padded to ntt_n rows.
+    // All columns one after another, each zero-padded to ntt_n values:
+    // column c is square[c * ntt_n .. (c + 1) * ntt_n].
     let mut square = vec![BabyBear::zero(); ntt_n * cols];
     for col in 0..cols {
         for (row, value) in data_square.get_column(col).into_iter().enumerate() {
-            square[row * cols + col] = value;
+            square[col * ntt_n + row] = value;
         }
     }
 
     // INTT to get coefficients, NTT to get evaluations: every column in one call each.
     if gpu_available {
         #[cfg(feature = "cuda")]
-        intt_cuda(&mut square, cols).expect("CUDA INTT failed");
+        gpu_transform(&mut square, ntt_n, true);
         #[cfg(feature = "cuda")]
-        ntt_cuda(&mut square, cols).expect("CUDA NTT failed");
+        gpu_transform(&mut square, ntt_n, false);
     } else {
-        for col in 0..cols {
-            let mut column: Vec<BabyBear> = (0..ntt_n).map(|row| square[row * cols + col]).collect();
-            intt(&mut column);
-            ntt(&mut column);
-            for (row, value) in column.into_iter().enumerate() {
-                square[row * cols + col] = value;
-            }
+        for column in square.chunks_mut(ntt_n) {
+            intt(column);
+            ntt(column);
         }
     }
 
     let mut extended_data_square = BabyBearDataSquare::new(vec![], 0, 0);
     for col in 0..cols {
         for row in 0..ntt_n {
-            extended_data_square.set_cell(col, row, square[row * cols + col]);
+            extended_data_square.set_cell(col, row, square[col * ntt_n + row]);
         }
     }
 
@@ -169,7 +183,7 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
     y_coeffs.resize(ntt_n, BabyBear::zero());
     if gpu_available {
         #[cfg(feature = "cuda")]
-        intt_cuda(&mut y_coeffs, 1).expect("CUDA INTT failed");
+        gpu_transform(&mut y_coeffs, ntt_n, true);
     } else {
         intt(&mut y_coeffs);
     }
@@ -178,7 +192,7 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
     let mut y_encoded = y_coeffs.clone();
     if gpu_available {
         #[cfg(feature = "cuda")]
-        ntt_cuda(&mut y_encoded, 1).expect("CUDA NTT failed");
+        gpu_transform(&mut y_encoded, ntt_n, false);
     } else {
         ntt(&mut y_encoded);
     }
