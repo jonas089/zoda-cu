@@ -1,7 +1,7 @@
-use crate::benchmark_utils::{encode_gpu_with_output, validate_zoda_encoding, EncodingConfig};
+use crate::benchmarks::utils::{encode_gpu_with_output, validate_zoda_encoding, EncodingConfig};
 
 #[cfg(feature = "cuda")]
-use crate::cuda_ntt::cuda_available;
+use crate::ntt::cuda::cuda_available;
 
 
 struct ValidatedEncodingResult {
@@ -10,7 +10,6 @@ struct ValidatedEncodingResult {
     validation_time_ms: f64,
     total_time_ms: f64,
     validation_passed: bool,
-    num_checks: usize,
 }
 
 
@@ -74,7 +73,6 @@ fn run_validated_encoding_benchmark(config: EncodingConfig) -> Option<ValidatedE
         validation_time_ms,
         total_time_ms,
         validation_passed,
-        num_checks,
     })
 }
 

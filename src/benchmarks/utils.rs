@@ -1,10 +1,10 @@
-use crate::babybear::BabyBear;
-use crate::ntt_babybear::{intt as cpu_intt, ntt as cpu_ntt};
+use crate::field::babybear::BabyBear;
+use crate::ntt::{intt_babybear as cpu_intt, ntt_babybear as cpu_ntt};
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 
 #[cfg(feature = "cuda")]
-use crate::cuda_ntt::{cuda_rs_encode_vertical, CudaBuffer};
+use crate::ntt::cuda::{intt_cuda, ntt_cuda};
 
 #[derive(Debug, Clone)]
 pub struct EncodingConfig {
@@ -83,55 +83,33 @@ pub fn encode_gpu_with_output(
     let ntt_size_k = config.ntt_size_k();
     let ntt_size_kn = config.ntt_size_kn();
 
-    let omega_k = BabyBear::get_root_of_unity(ntt_size_k.trailing_zeros());
-    let omega_kn = BabyBear::get_root_of_unity(ntt_size_kn.trailing_zeros());
-
-    let total_input_size = num_positions * ntt_size_k;
-    let total_output_size = num_positions * ntt_size_kn;
-    let work_size = num_positions * ntt_size_k;
-
-    let mut h_input: Vec<u64> = Vec::with_capacity(total_input_size);
-    for col in 0..num_positions {
-        for row in 0..k {
-            let value = ((row * num_positions + col) % 2013265921) as u64;
-            h_input.push(value);
-        }
-        for _ in k..ntt_size_k {
-            h_input.push(0);
-        }
-    }
-
-    let mut h_output = vec![0u64; total_output_size];
-    let mut d_input = CudaBuffer::new(total_input_size)?;
-    let mut d_output = CudaBuffer::new(total_output_size)?;
-    let d_work = CudaBuffer::new(work_size)?;
+    // Un-batched baseline: every column is encoded with its own INTT -> pad -> NTT,
+    // each of which is a separate upload / kernel sequence / download. This is the
+    // simplest thing that works and is the reference point for batching later.
+    let mut encoded_columns: Vec<Vec<BabyBear>> = Vec::with_capacity(num_positions);
 
     let start = Instant::now();
 
-    d_input.copy_from_host(&h_input)?;
+    for col in 0..num_positions {
+        let mut column: Vec<BabyBear> = (0..k)
+            .map(|row| BabyBear::new(((row * num_positions + col) % 2013265921) as u64))
+            .collect();
 
-    unsafe {
-        cuda_rs_encode_vertical(
-            d_input.as_ptr(),
-            d_output.as_ptr(),
-            d_work.as_ptr(),
-            num_positions as u32,
-            ntt_size_k as u32,
-            ntt_size_kn as u32,
-            omega_k.value,
-            omega_kn.value,
-        );
+        column.resize(ntt_size_k, BabyBear::zero());
+        intt_cuda(&mut column)?;
+        column.resize(ntt_size_kn, BabyBear::zero());
+        ntt_cuda(&mut column)?;
+
+        encoded_columns.push(column);
     }
-
-    d_output.copy_to_host(&mut h_output)?;
 
     let elapsed_ns = start.elapsed().as_nanos() as u64;
 
     // Convert output to row-major format
     let mut encoded_rows: Vec<Vec<BabyBear>> = vec![vec![BabyBear::zero(); num_positions]; k + n];
-    for col in 0..num_positions {
+    for (col, column) in encoded_columns.iter().enumerate() {
         for row in 0..(k + n) {
-            encoded_rows[row][col] = BabyBear::new(h_output[col * ntt_size_kn + row]);
+            encoded_rows[row][col] = column[row];
         }
     }
 
@@ -150,9 +128,6 @@ pub fn validate_zoda_encoding(
     let num_positions = config.num_positions();
     let ntt_size_k = config.ntt_size_k();
     let ntt_size_kn = config.ntt_size_kn();
-
-    let omega_k = BabyBear::get_root_of_unity(ntt_size_k.trailing_zeros());
-    let omega_kn = BabyBear::get_root_of_unity(ntt_size_kn.trailing_zeros());
 
     // Phase 1: Column Encoding Verification
     let num_column_checks = 64.min(num_positions);
@@ -176,9 +151,9 @@ pub fn validate_zoda_encoding(
 
         // Encode column on CPU: INTT → pad → NTT
         original_input.resize(ntt_size_k, BabyBear::zero());
-        cpu_intt(&mut original_input, omega_k);
+        cpu_intt(&mut original_input);
         original_input.resize(ntt_size_kn, BabyBear::zero());
-        cpu_ntt(&mut original_input, omega_kn);
+        cpu_ntt(&mut original_input);
 
         // Verify GPU matches CPU
         for row_idx in 0..(k + n) {
@@ -216,9 +191,9 @@ pub fn validate_zoda_encoding(
         }
 
         column_data.resize(ntt_size_k, BabyBear::zero());
-        cpu_intt(&mut column_data, omega_k);
+        cpu_intt(&mut column_data);
         column_data.resize(ntt_size_kn, BabyBear::zero());
-        cpu_ntt(&mut column_data, omega_kn);
+        cpu_ntt(&mut column_data);
 
         encoded_rlc_columns.push(column_data);
     }

@@ -9,15 +9,6 @@ default = []
 cuda = []
 
 [dependencies]
-ark-ff = "0.5.0"
-num-bigint = "0.4.6"
-num-integer = "0.1.46"
-num-traits = "0.2.19"
 rand = "0.9.2"
-rand_chacha = "0.9.0"
 sha2 = "0.10.8"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-metal = "0.32.0"
-
-[build-dependencies]

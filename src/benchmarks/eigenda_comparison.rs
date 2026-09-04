@@ -1,9 +1,9 @@
-use crate::benchmark_utils::{encode_gpu_with_output, validate_zoda_encoding, EncodingConfig};
+use crate::benchmarks::utils::{encode_gpu_with_output, validate_zoda_encoding, EncodingConfig};
 use std::fs::File;
 use std::io::Write;
 
 #[cfg(feature = "cuda")]
-use crate::cuda_ntt::cuda_available;
+use crate::ntt::cuda::cuda_available;
 
 
 struct BenchmarkResult {

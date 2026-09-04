@@ -7,7 +7,20 @@ Full ZODA encoding test with y-column verification:
 
 > **⚠️ Security Notice**: This is a proof-of-concept implementation using the BabyBear field (p = 2^31 - 2^27 + 1), which provides ~31 bits of security. This is **NOT cryptographically secure** for production use. For production data availability systems, a larger field is required (e.g., Goldilocks p = 2^64 - 2^32 + 1 for 64-bit security, or a 128-bit field for full cryptographic security). The encoding is mathematically correct and performance characteristics would scale similarly to larger fields.
 
+## Kernel status
+
+`cuda/ntt_kernel.cu` is currently a deliberately minimal baseline: a single radix-2 NTT / INTT over
+`u32` BabyBear elements, one global-memory kernel launch per stage, twiddles precomputed on the host.
+Multiplication is Montgomery (R = 2^32) with the parameters derived at runtime in `mont_params()`;
+values are converted into Montgomery form on entry and back to canonical form on exit, so the Rust
+interface only ever sees canonical values. There is no batching or shared memory yet; it exists as a
+clean starting point for those optimisations and mirrors the CPU reference in `src/ntt/cpu.rs`.
+
 ## Benchmark Results
+
+> The numbers below were measured with the earlier batched kernel and do **not** reflect the current
+> minimal baseline, which encodes one column at a time.
+
 cargo test benchmark_zoda_eigenda_comparison --features cuda --release -- --ignored --nocapture
 
 Direct comparison against [rsema1d](https://github.com/celestiaorg/eigenda-kzg-bench):
@@ -82,7 +95,7 @@ On a single RTX 5090 (32 GB):
 
 ## Validated Benchmark
 
-A validated benchmark is available that verifies the correctness of the GPU encoding using the full ZODA protocol: [benchmark_zoda_validated.rs](src/benchmark_zoda_validated.rs)
+A validated benchmark is available that verifies the correctness of the GPU encoding using the full ZODA protocol: [zoda_validated.rs](src/benchmarks/zoda_validated.rs)
 
 This test performs **two-phase verification**:
 

@@ -1,13 +1,13 @@
 // ZODA implementation using BabyBear field with GPU acceleration
 
-use crate::babybear::BabyBear;
-use crate::ntt_babybear::{intt, ntt, roots_of_unity_domain};
+use crate::field::babybear::BabyBear;
+use crate::ntt::{intt_babybear as intt, ntt_babybear as ntt};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::cmp::max;
 
 #[cfg(feature = "cuda")]
-use crate::cuda_ntt::{cuda_available, intt_cuda, ntt_cuda};
+use crate::ntt::cuda::{cuda_available, intt_cuda, ntt_cuda};
 
 /// Data cell in the square
 #[derive(Clone)]
@@ -31,12 +31,6 @@ impl BabyBearDataSquare {
             columns,
             rows,
         }
-    }
-
-    pub fn get_cell(&self, column: usize, row: usize) -> Option<&BabyBearCell> {
-        self.cells
-            .iter()
-            .find(|cell| cell.column == column && cell.row == row)
     }
 
     pub fn set_cell(&mut self, column: usize, row: usize, value: BabyBear) {
@@ -81,17 +75,6 @@ impl BabyBearDataSquare {
     }
 }
 
-/// Polynomial using BabyBear field
-pub struct BabyBearPolynomial {
-    pub coeffs: Vec<BabyBear>,
-}
-
-impl BabyBearPolynomial {
-    pub fn from_coeffs(coeffs: Vec<BabyBear>) -> Self {
-        Self { coeffs }
-    }
-}
-
 /// Run ZODA test with BabyBear field
 /// Use GPU acceleration if available
 pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Duration {
@@ -117,9 +100,8 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
 
     // NTT domain (power-of-two)
     let ntt_n = data_square.rows.next_power_of_two();
-    let omega = BabyBear::get_root_of_unity(ntt_n.trailing_zeros());
 
-    let mut column_polys = Vec::new();
+    let mut column_polys: Vec<Vec<BabyBear>> = Vec::new();
     for column_idx in 0..data_square.columns {
         let mut evals = data_square.get_column(column_idx);
         evals.resize(ntt_n, BabyBear::zero());
@@ -130,22 +112,22 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
             #[cfg(feature = "cuda")]
             intt_cuda(&mut coeffs).expect("CUDA INTT failed");
         } else {
-            intt(&mut coeffs, omega);
+            intt(&mut coeffs);
         }
 
-        column_polys.push(BabyBearPolynomial::from_coeffs(coeffs));
+        column_polys.push(coeffs);
     }
 
     let mut extended_data_square = BabyBearDataSquare::new(vec![], 0, 0);
-    for (col_idx, column_poly) in column_polys.into_iter().enumerate() {
-        let mut evals = column_poly.coeffs.clone();
+    for (col_idx, coeffs) in column_polys.into_iter().enumerate() {
+        let mut evals = coeffs;
 
         // NTT to get evaluations
         if gpu_available {
             #[cfg(feature = "cuda")]
             ntt_cuda(&mut evals).expect("CUDA NTT failed");
         } else {
-            ntt(&mut evals, omega);
+            ntt(&mut evals);
         }
 
         for (i, y) in evals.into_iter().enumerate() {
@@ -190,7 +172,7 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
         #[cfg(feature = "cuda")]
         intt_cuda(&mut y_coeffs).expect("CUDA INTT failed");
     } else {
-        intt(&mut y_coeffs, omega);
+        intt(&mut y_coeffs);
     }
 
     // Evaluate y over extended domain
@@ -199,7 +181,7 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
         #[cfg(feature = "cuda")]
         ntt_cuda(&mut y_encoded).expect("CUDA NTT failed");
     } else {
-        ntt(&mut y_encoded, omega);
+        ntt(&mut y_encoded);
     }
 
     for _ in 0..64 {
@@ -235,5 +217,29 @@ mod tests {
         }
         let duration = run_zoda_test_babybear(4, true);
         println!("[BabyBear GPU 4x4]: {:?}", duration);
+    }
+
+    #[test]
+    fn test_compare_cpu_gpu() {
+        for size in [4, 8, 16, 32] {
+            println!("Testing {}x{} data square:", size, size);
+
+            let duration_cpu = run_zoda_test_babybear(size, false);
+            println!("  BabyBear CPU:   {:?}", duration_cpu);
+
+            #[cfg(feature = "cuda")]
+            if cuda_available() {
+                let duration_gpu = run_zoda_test_babybear(size, true);
+                println!("  BabyBear GPU:   {:?}", duration_gpu);
+                println!(
+                    "  GPU Speedup vs CPU: {:.2}x",
+                    duration_cpu.as_secs_f64() / duration_gpu.as_secs_f64()
+                );
+            } else {
+                println!("  BabyBear GPU:   Not available");
+            }
+
+            println!();
+        }
     }
 }
