@@ -31,11 +31,11 @@ const SHARE_BYTES: usize = 512;
 /// Square sides to measure. Payload is `side * side * SHARE_BYTES`.
 const SIDES: [usize; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
 
-/// Above this side the CPU-reference validation is skipped. It re-encodes every
-/// column on the CPU and materialises a second copy of the square, which needs
-/// more host memory than this box has at 4096. The kernel is unchanged either
-/// way; only the correctness check is dropped, and the table says so.
-const VALIDATE_MAX_SIDE: usize = 2048;
+/// Above this side the CPU-reference validation is skipped, because it needs
+/// more host memory than this box has. Since the RLC check now extends the RLC
+/// vector instead of re-encoding every column, it no longer allocates a second
+/// copy of the square, so 4096 is in reach where it previously was not.
+const VALIDATE_MAX_SIDE: usize = 4096;
 
 fn config_for(side: usize) -> EncodingConfig {
     EncodingConfig {
@@ -115,17 +115,26 @@ fn run_unvalidated(side: usize) -> Option<SquareResult> {
     Some(result_from(side, median, None))
 }
 
-/// The square the extrapolations are based on: the largest one that still passed
-/// validation. Above `VALIDATE_MAX_SIDE` the host is close to full - the pinned
-/// square alone is 16 GiB at side 4096 - so the `encode` figures there are
-/// degraded by memory pressure and understate the pipeline. The `GPU xform`
-/// figures are unaffected, since the device only ever sees streamed chunks.
+/// Above this side the host runs short of memory during an encode. At side 4096
+/// the pinned square alone is 16 GiB, so the `encode` column there is degraded
+/// by memory pressure and understates the pipeline. `GPU xform` is unaffected,
+/// because the device only ever sees streamed chunks.
+///
+/// Note that this is a separate question from whether we validated the square.
+/// Validation used to be the binding memory constraint, so "largest validated"
+/// used to be a usable proxy for "largest unpressured". It is not any more: the
+/// RLC check no longer allocates a second copy of the square, so we can now
+/// validate sides whose `encode` figure we still should not extrapolate from.
+const ENCODE_UNPRESSURED_MAX_SIDE: usize = 2048;
+
+/// The square the extrapolations are based on: the largest one whose `encode`
+/// figure is not degraded by host memory pressure.
 #[cfg(feature = "cuda")]
 fn projection_basis(results: &[SquareResult]) -> &SquareResult {
     results
         .iter()
         .rev()
-        .find(|r| r.validated == Some(true))
+        .find(|r| r.side <= ENCODE_UNPRESSURED_MAX_SIDE)
         .unwrap_or_else(|| results.last().unwrap())
 }
 
@@ -265,11 +274,12 @@ fn print_table(results: &[SquareResult]) {
     let basis = projection_basis(results);
     if basis.side != big.side {
         println!(
-            "\nNote: at side > {VALIDATE_MAX_SIDE} the pinned square alone is {:.0} GiB and the host \
-             runs short of memory, so the `encode` column there is degraded by memory pressure and \
-             understates the pipeline. `GPU xform` is unaffected - the device only sees streamed \
-             chunks. Extrapolations below therefore use the largest validated square.",
-            big.extended_mib / 1024.0
+            "\nNote: at side > {ENCODE_UNPRESSURED_MAX_SIDE} the pinned square alone is {:.0} GiB and \
+             the host runs short of memory, so the `encode` column there is degraded by memory \
+             pressure and understates the pipeline. `GPU xform` is unaffected - the device only \
+             sees streamed chunks. Extrapolations below therefore use side {}.",
+            big.extended_mib / 1024.0,
+            basis.side
         );
     }
     println!(

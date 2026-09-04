@@ -8,7 +8,7 @@ All numbers in this document were measured on one machine, a single RTX 5090 wit
 and CUDA toolkit `12.4`. They are reproducible with the commands below, but they describe this one
 setup and not GPUs in general.
 
-The short version of what we found: the kernel encodes at `61.7 Gb/s`, which is more than the
+The short version of what we found: the kernel encodes at `61.6 Gb/s`, which is more than the
 `34-45 Gbps` network link of a node in Celestia's Fibre cluster. The pipeline we wrap around that
 kernel only delivers `6.1 Gb/s`, because `90%` of the wall clock goes into a single-threaded host
 transpose. The GPU is not our bottleneck. The code on either side of it is.
@@ -65,28 +65,36 @@ timed, since a real encoder does neither.
 
 | Square | Payload | Extended | `GPU xform` | `encode` | `GPU xform` Gb/s | `encode` Gb/s | Validated |
 |--------|---------|----------|-------------|----------|------------------|---------------|-----------|
-| 64x64 | 2 MiB | 4 MiB | 0.6 ms | 1.0 ms | 26.1 | 16.1 | yes |
-| 128x128 | 8 MiB | 16 MiB | 1.6 ms | 5.8 ms | 42.9 | 11.6 | yes |
-| 256x256 | 32 MiB | 64 MiB | 5.2 ms | 35.6 ms | 51.6 | 7.5 | yes |
-| 512x512 | 128 MiB | 256 MiB | 18.9 ms | 170.8 ms | 56.8 | 6.3 | yes |
-| 1024x1024 | 512 MiB | 1024 MiB | 71.0 ms | 679.9 ms | 60.5 | 6.3 | yes |
-| 2048x2048 | 2048 MiB | 4096 MiB | 278.4 ms | 2831.5 ms | 61.7 | 6.1 | yes |
-| 4096x4096 | 8192 MiB | 16384 MiB | 1114.1 ms | 45657.4 ms | 61.7 | 1.5 | skipped |
+| 64x64 | 2 MiB | 4 MiB | 0.6 ms | 1.0 ms | 26.3 | 16.3 | yes |
+| 128x128 | 8 MiB | 16 MiB | 1.5 ms | 6.7 ms | 45.0 | 10.0 | yes |
+| 256x256 | 32 MiB | 64 MiB | 5.3 ms | 43.7 ms | 50.9 | 6.1 | yes |
+| 512x512 | 128 MiB | 256 MiB | 19.2 ms | 170.8 ms | 55.8 | 6.3 | yes |
+| 1024x1024 | 512 MiB | 1024 MiB | 71.1 ms | 680.8 ms | 60.4 | 6.3 | yes |
+| 2048x2048 | 2048 MiB | 4096 MiB | 279.1 ms | 2822.3 ms | 61.6 | 6.1 | yes |
+| 4096x4096 | 8192 MiB | 16384 MiB | 1119.6 ms | 45418.1 ms | 61.4 | 1.5 | yes |
 
 > [!NOTE]
-> Our validation re-encodes every column on the CPU and needs a second host copy of the square, so
-> we skip it above side `2048`. The table says `skipped` rather than `yes`, because we did not check
-> that square and should not imply that we did.
+> Every square in this table is validated against the CPU reference, including `4096x4096`. That was
+> not possible before: our RLC check used to re-encode all `num_positions` columns and hold a second
+> copy of the square, which needed more host memory than we have at that side. It now extends the
+> RLC vector instead, which is `4` transforms rather than `524288` of them, so the whole run
+> validates in less time than it previously took while skipping the largest square.
 
 > [!WARNING]
 > The `4096x4096` `encode` figure is degraded by host memory pressure. The pinned square alone is
-> `16 GiB` on a `59 GiB` box, so that number understates our pipeline and should not be used as a
-> baseline. Its `GPU xform` figure is unaffected, because the device only ever holds streamed chunks.
+> `16 GiB` on a `59 GiB` box, so that number understates our pipeline and we do not extrapolate from
+> it. Its `GPU xform` figure is unaffected, because the device only ever holds streamed chunks.
+
+> [!NOTE]
+> The `encode` column varies between runs at the small sides, where the window is only a few
+> milliseconds. Across five runs we saw `128x128` between `5.7` and `6.7 ms`. The `GPU xform` column
+> is stable to about `1%` everywhere. These are the figures from one run and we did not pick the
+> most favourable one.
 
 ## The kernel gets faster on bigger squares, then hits PCIe
 
 The first thing to notice is that our transform throughput *rises* with the square side, from
-`26.1 Gb/s` at `64x64` to `61.7 Gb/s` at `2048x2048`. That is a `2.4x` gain simply from growing the
+`26.3 Gb/s` at `64x64` to `61.6 Gb/s` at `2048x2048`. That is a `2.3x` gain simply from growing the
 square.
 
 The reason is that larger squares give the kernel more parallel work per launch, and they amortize
@@ -96,10 +104,10 @@ work to hide any of it. So the regime our kernel is *worst* at is the small one,
 scaling wall as squares grow. That is the property we care about if the square is going to be raised
 over time.
 
-Then it flattens. We measure `61.7 Gb/s` at both `2048` and `4096`. This plateau is PCIe volume and
-not the butterflies. At `2048x2048` our payload is `2.147 GB`, but `12.885 GB` crosses the bus, which
-is a `6.0x` amplification. In `278.4 ms` that works out to `46.3 GB/s` of wire bandwidth, which is
-about where real pinned transfers land on this card's Gen5 x16 link.
+Then it flattens. We measure `61.6 Gb/s` at `2048` and `61.4` at `4096`. This plateau is PCIe volume
+and not the butterflies. At `2048x2048` our payload is `2.147 GB`, but `12.885 GB` crosses the bus,
+which is a `6.0x` amplification. In `279.1 ms` that works out to `46.2 GB/s` of wire bandwidth, which
+is about where real pinned transfers land on this card's Gen5 x16 link.
 
 In other words, our Montgomery arithmetic is completely hidden behind the transfers. We will see
 below where the extra `5x` of traffic comes from and why the same fix lifts both this number and our
@@ -113,19 +121,20 @@ this is a property of squares and has nothing to do with our kernel.
 
 | Budget | Side at `GPU xform` rate | Side at `encode` rate |
 |--------|--------------------------|-----------------------|
-| 1 s | 3881 | 1217 |
-| 6 s | 9507 | 2981 |
+| 1 s | 3877 | 1219 |
+| 6 s | 9496 | 2986 |
 
 > [!NOTE]
-> These two columns are extrapolated from our largest *validated* square, `2048x2048`. We did not
-> measure at these sides. We deliberately do not extrapolate from the peak `encode` rate, because
-> that peak occurs at the smallest square and would overstate the ceiling by roughly `2.7x`.
+> These two columns are extrapolated from `2048x2048`, our largest square whose `encode` figure is
+> not degraded by memory pressure. We did not measure at these sides. We deliberately do not
+> extrapolate from the peak `encode` rate either, because that peak occurs at the smallest square and
+> would overstate the ceiling by roughly `2.7x`.
 
 ## The ceiling is host-side, not the GPU
 
-At `2048x2048` our transforms take `278 ms` of a `2832 ms` encode. That means `90%` of the wall clock
+At `2048x2048` our transforms take `279 ms` of a `2822 ms` encode. That means `90%` of the wall clock
 is the single-threaded host transpose, and GPU utilisation sat at `16%` across the whole run. We
-deliver `6.1 Gb/s` end-to-end where the kernel does `61.7`, so we are throwing away a factor of `10`.
+deliver `6.1 Gb/s` end-to-end where the kernel does `61.6`, so we are throwing away a factor of `10`.
 
 Device memory is not what caps our square size. Because columns stream through in chunks, the device
 only holds `ntt_size_kn * 1024` elements per stream, which is `50 MB` of the card's `32 GB` at
@@ -159,7 +168,7 @@ The first two are measurable as PCIe volume. At `2048x2048`:
 
 If we upload row-major input and do the transpose and the zero fill on the device, we address all
 three at once. We halve our PCIe traffic, we remove most of the host time, and we lift the transform
-plateau, because that plateau *is* the traffic. At the `46.3 GB/s` of wire bandwidth we already
+plateau, because that plateau *is* the traffic. At the `46.2 GB/s` of wire bandwidth we already
 measure, `6.442 GB` would take about `139 ms`, which is roughly `123 Gb/s` of payload and double
 today's kernel figure.
 
@@ -178,11 +187,11 @@ against a single node's capacity:
 
 | Fibre figure | Value | This kernel, one RTX 5090 |
 |--------------|-------|---------------------------|
-| Per-node network link | 34-45 Gbps | 61.7 Gb/s `GPU xform` |
-| Max blobsize | 128 MB | 18.9 ms per 128 MiB square (512x512) |
+| Per-node network link | 34-45 Gbps | 61.6 Gb/s `GPU xform` |
+| Max blobsize | 128 MB | 19.2 ms per 128 MiB square (512x512) |
 
 So one GPU encodes faster than a Fibre node's link can carry. A maximum-size `128 MB` blob costs us
-`18.9 ms` of GPU time, which is about `53` blobs per second.
+`19.2 ms` of GPU time, which is about `52` blobs per second.
 
 > [!NOTE]
 > The announcement's "881x faster than KZG" claim comes with no stated hardware, field or
@@ -195,7 +204,7 @@ encoding ceiling rather than its share of the test, then removing it would be wo
 
 | | Per-node gain over 2 Gb/s |
 |---|---|
-| This kernel, unconstrained | 61.7 Gb/s, about `31x` |
+| This kernel, unconstrained | 61.6 Gb/s, about `31x` |
 | Capped by the node's own link | 34-45 Gbps, about `17-22x` |
 | Our shipped end-to-end pipeline | 6.1 Gb/s, about `3x` |
 
@@ -212,7 +221,7 @@ there to the middle row needs the data-flow fix described above.
 > capped them `20x` below it. The likelier reading is that node count was chosen to reach `1 Tb/s`
 > aggregate.
 
-The claim that does not need this premise is the capacity comparison above. `61.7 Gb/s` of encode
+The claim that does not need this premise is the capacity comparison above. `61.6 Gb/s` of encode
 against a `34-45 Gbps` link means encoding is not what a node has to be provisioned around.
 
 ## What we would optimize next
@@ -231,9 +240,71 @@ Ordered by how much we expect each step to buy us:
 4. **Parallelize the transpose** if we want a contained interim fix without touching the kernel. It
    is memory-bound and trivially parallel by column block.
 
+## RLC soundness: four base-field limbs
+
+Our random linear combination coefficients used to be single BabyBear elements, which gives a
+challenge space of `p ~ 2^30.9`. That is not enough. The coefficients are derived by Fiat-Shamir
+from `SHA256(data_root)`, and `data_root` is a sequential hash over the square, so an attacker can
+fix the first `99.9%` of the data, keep the SHA-256 **midstate**, and grind only the trailing
+elements. Each attempt then costs one compression call rather than a rehash of `4 GB`, so a
+`2^31` challenge space is a few hours of GPU work, not a theoretical concern.
+
+We fixed this the same way rsema1d does, without touching the kernel or leaving BabyBear. Each
+coefficient is now `RLC_LIMBS = 4` independent base-field elements, so the challenge lives in
+`F_p^4 ~ 2^123.6`. The key point is that this needs **no extension-field arithmetic at all**: a data
+element is a base-field scalar and a coefficient is a limb vector, and a scalar times a limb vector
+is component-wise.
+
+```
+acc[l] += value * coeff[l]      for l in 0..4
+```
+
+A forger now has to satisfy four *independent* base-field linear conditions at once. Writing
+`c[col] = sum_l c_l[col] * b^l` over a base of the extension, the condition `sum_col e[col]*c[col] = 0`
+for a nonzero base-field error `e` becomes `sum_col e[col]*c_l[col] = 0` for **every** `l`
+separately, because the `b^l` are linearly independent over `F_p`. Each holds with probability
+`1/p`, independently, so the total is `p^-4`.
+
+| limbs | challenge space | after union bound over the checked rows |
+|-------|-----------------|------------------------------------------|
+| 1 (before) | 2^30.9 | 2^-18.9 |
+| 3 | 2^92.7 | 2^-80.7 |
+| **4** | **2^123.6** | **2^-111.6** |
+
+Note that `4` is the minimum for `100`-bit security and not a safety margin, since `3` limbs would
+land at `2^-80.7`. It is also the most we can take from one SHA-256, because each limb consumes an
+`8`-byte window of the `32`-byte digest. That means the coefficient derivation costs exactly what it
+did before for `4x` the challenge space.
+
+> [!NOTE]
+> This closes the RLC forgery term only. Two other things gate `100`-bit ZODA and neither is helped
+> by a wider coefficient field. Sampling soundness depends on how many positions a light client
+> checks, which is an application-layer parameter. And our `compute_data_root` is still a flat
+> SHA-256 rather than a Merkle tree, so nothing can be *opened* to a light client. rsema1d commits
+> `SHA256(rowRoot || rlcRoot)` over two Merkle trees; we have not matched that yet.
+
+### Extending the RLC vector instead of re-encoding
+
+The limbs also let us make the check much cheaper. The RLC and the Reed-Solomon extension are both
+`F_p`-linear, and the encoder `E = NTT . pad . INTT . pad` is applied per column, so for any
+coefficients `c` we have:
+
+```
+sum_col c[col] * E(v_col)[i]  =  E( sum_col c[col] * v_col )[i]
+```
+
+The right-hand side is `E` applied to the vector of per-row RLCs of the *original* rows. So instead
+of re-encoding every column on the CPU and then taking RLCs, we take the RLC of the `k` original
+rows and extend that one vector, limb by limb. That is `4` transforms of length `ntt_size_kn`
+instead of `num_positions` of them, which at side `2048` is `4` instead of `262144`.
+
+Note that this holds even though our encoding is **not** systematic: `INTT` then `NTT` places the
+original values at stride `(k+n)/k` rather than in the first `k` rows. The argument above never
+assumes where the systematic positions are, only that `E` is linear and that we apply the same `E`.
+
 ## Correctness
 
-Every square up to side `2048` in the results table is validated against the CPU reference.
+Every square in the results table, including `4096x4096`, is validated against the CPU reference.
 `src/benchmarks/zoda_validated.rs` additionally checks full ZODA soundness in two phases:
 
 1. **Column encoding.** Every sampled column must be a valid Reed-Solomon codeword and must match
@@ -250,9 +321,9 @@ cargo test --features cuda --release benchmark_zoda_validated -- --ignored --noc
 
 ## Conclusion
 
-1. **A single GPU already exceeds a Fibre node's network link for encoding.** `61.7 Gb/s` of
+1. **A single GPU already exceeds a Fibre node's network link for encoding.** `61.6 Gb/s` of
    transform against a `34-45 Gbps` link means encode compute is not what limits a node.
-2. **Bigger squares suit our kernel better, not worse.** Throughput rises `2.4x` from side `64` to
+2. **Bigger squares suit our kernel better, not worse.** Throughput rises `2.3x` from side `64` to
    `2048` and then holds flat. Nothing in the measured range degrades as the square grows.
 3. **Both remaining limits are data flow, and one change fixes both.** Our kernel plateau is PCIe
    volume, caused by shipping host-built zeros and round-tripping the square between the two

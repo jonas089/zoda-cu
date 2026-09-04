@@ -57,18 +57,61 @@ pub fn compute_data_root(encoded_rows: &[Vec<BabyBear>]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-pub fn generate_deterministic_coefficients(data_root: &str, num_columns: usize) -> Vec<BabyBear> {
+/// Base-field limbs in one RLC challenge.
+///
+/// The coefficients live in `F_p^RLC_LIMBS`, so a forged RLC passes one check
+/// with probability `p^-RLC_LIMBS`. For BabyBear that is `2^-123.6` at four
+/// limbs, against `2^-30.9` with a single base-field coefficient. rsema1d does
+/// the same thing with `GF(2^16)^8 = GF(2^128)`.
+///
+/// Four is also the most we can take from one SHA-256: the digest is 32 bytes
+/// and each limb consumes an 8-byte window.
+pub const RLC_LIMBS: usize = 4;
+
+/// One RLC value: an element of `F_p^RLC_LIMBS` held as its base-field limbs.
+///
+/// We never multiply two of these, so no extension-field arithmetic is needed.
+/// A data element is a base-field scalar and a coefficient is a limb vector,
+/// and a scalar times a limb vector is component-wise.
+pub type Rlc = [BabyBear; RLC_LIMBS];
+
+pub fn rlc_zero() -> Rlc {
+    [BabyBear::zero(); RLC_LIMBS]
+}
+
+/// `sum over columns of row[col] * coeff[col]`, accumulated per limb.
+pub fn rlc_row(row: &[BabyBear], coefficients: &[Rlc]) -> Rlc {
+    let mut acc = rlc_zero();
+    for (&value, coeff) in row.iter().zip(coefficients.iter()) {
+        for limb in 0..RLC_LIMBS {
+            acc[limb] = acc[limb] + (value * coeff[limb]);
+        }
+    }
+    acc
+}
+
+/// One coefficient per column, each `RLC_LIMBS` independent base-field elements.
+///
+/// A single SHA-256 per column gives all the limbs: the digest's four disjoint
+/// 8-byte windows are independent uniform `u64` under the random oracle model,
+/// which is what the limbs have to be for the soundness argument to multiply
+/// out to `p^-RLC_LIMBS`.
+pub fn generate_deterministic_coefficients(data_root: &str, num_columns: usize) -> Vec<Rlc> {
     (0..num_columns)
         .map(|i| {
             let mut hasher = Sha256::new();
             hasher.update(data_root.as_bytes());
             hasher.update(i.to_le_bytes());
             let digest = hasher.finalize();
-            let val = u64::from_be_bytes([
-                digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
-                digest[7],
-            ]);
-            BabyBear::new(val) + BabyBear::new(i as u64)
+
+            let mut coeff = rlc_zero();
+            for (limb, slot) in coeff.iter_mut().enumerate() {
+                let window: [u8; 8] = digest[limb * 8..(limb + 1) * 8]
+                    .try_into()
+                    .expect("8 byte window");
+                *slot = BabyBear::new(u64::from_be_bytes(window));
+            }
+            coeff
         })
         .collect()
 }
@@ -237,56 +280,52 @@ pub fn validate_zoda_encoding(
     let data_root = compute_data_root(encoded_rows);
     let coefficients = generate_deterministic_coefficients(&data_root, num_positions);
 
-    // Compute RLC for ALL k+n rows from GPU output
-    let all_gpu_rlc: Vec<BabyBear> = encoded_rows
-        .iter()
-        .take(k + n)
-        .map(|row| {
-            row.iter()
-                .zip(coefficients.iter())
-                .fold(BabyBear::zero(), |acc, (&val, &coeff)| acc + (val * coeff))
-        })
+    // The RLC and the Reed-Solomon extension are both `F_p`-linear, and the
+    // generator matrix has base-field entries, so the two commute:
+    //
+    //     RLC(extended_row_i) = sum_j G[i][j] * RLC(original_row_j)
+    //
+    // So instead of re-encoding all `num_positions` columns on the CPU, we take
+    // the RLC of the `k` original rows and extend that one vector. Each limb is
+    // an independent base-field sequence, so this is `RLC_LIMBS` transforms of
+    // length `ntt_size_kn` rather than `num_positions` of them.
+    let mut limb_polys: Vec<Vec<BabyBear>> = (0..RLC_LIMBS)
+        .map(|_| Vec::with_capacity(ntt_size_kn))
         .collect();
 
-    // Compute what RLC values SHOULD be by encoding on CPU
-    let mut encoded_rlc_columns: Vec<Vec<BabyBear>> = Vec::new();
-
-    for col_idx in 0..num_positions {
-        // Encode this column on CPU
-        let mut column_data: Vec<BabyBear> = Vec::with_capacity(k);
-        for row_idx in 0..k {
+    let mut original_row: Vec<BabyBear> = vec![BabyBear::zero(); num_positions];
+    for row_idx in 0..k {
+        for (col_idx, slot) in original_row.iter_mut().enumerate() {
             let value = ((row_idx * num_positions + col_idx) % 2013265921) as u64;
-            column_data.push(BabyBear::new(value));
+            *slot = BabyBear::new(value);
         }
-
-        column_data.resize(ntt_size_k, BabyBear::zero());
-        cpu_intt(&mut column_data);
-        column_data.resize(ntt_size_kn, BabyBear::zero());
-        cpu_ntt(&mut column_data);
-
-        encoded_rlc_columns.push(column_data);
+        let row_rlc = rlc_row(&original_row, &coefficients);
+        for limb in 0..RLC_LIMBS {
+            limb_polys[limb].push(row_rlc[limb]);
+        }
     }
 
-    // Now compute RLC for each row from the encoded columns
-    let mut all_cpu_rlc: Vec<BabyBear> = Vec::with_capacity(k + n);
-    for row_idx in 0..(k + n) {
-        let mut rlc_sum = BabyBear::zero();
-        for col_idx in 0..num_positions {
-            rlc_sum = rlc_sum + (encoded_rlc_columns[col_idx][row_idx] * coefficients[col_idx]);
-        }
-        all_cpu_rlc.push(rlc_sum);
+    for poly in limb_polys.iter_mut() {
+        poly.resize(ntt_size_k, BabyBear::zero());
+        cpu_intt(poly);
+        poly.resize(ntt_size_kn, BabyBear::zero());
+        cpu_ntt(poly);
     }
 
-    // Verify GPU RLC matches CPU RLC for all k+n rows
+    // Every sampled extended row's RLC must equal the extended RLC vector at
+    // that index, limb for limb.
     let num_rlc_checks = 64.min(k + n);
 
     for check_idx in 0..num_rlc_checks {
         let row_idx = (check_idx * (k + n)) / num_rlc_checks;
+        let got = rlc_row(&encoded_rows[row_idx], &coefficients);
 
-        if all_gpu_rlc[row_idx].value != all_cpu_rlc[row_idx].value {
-            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-            let total_checks = num_column_checks + check_idx;
-            return Ok((false, elapsed, total_checks));
+        for limb in 0..RLC_LIMBS {
+            if got[limb].value != limb_polys[limb][row_idx].value {
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                let total_checks = num_column_checks + check_idx;
+                return Ok((false, elapsed, total_checks));
+            }
         }
     }
 
