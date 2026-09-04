@@ -2,5 +2,5 @@
 //! module only exists under `cargo test --features cuda`.
 
 pub mod utils;
-mod eigenda_comparison;
+mod celestia_squares;
 mod zoda_validated;
