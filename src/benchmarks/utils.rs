@@ -96,9 +96,9 @@ pub fn encode_gpu_with_output(
             .collect();
 
         column.resize(ntt_size_k, BabyBear::zero());
-        intt_cuda(&mut column)?;
+        intt_cuda(&mut column, 1)?;
         column.resize(ntt_size_kn, BabyBear::zero());
-        ntt_cuda(&mut column)?;
+        ntt_cuda(&mut column, 1)?;
 
         encoded_columns.push(column);
     }

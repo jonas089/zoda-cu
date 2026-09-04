@@ -110,7 +110,7 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
         let mut coeffs = evals;
         if gpu_available {
             #[cfg(feature = "cuda")]
-            intt_cuda(&mut coeffs).expect("CUDA INTT failed");
+            intt_cuda(&mut coeffs, 1).expect("CUDA INTT failed");
         } else {
             intt(&mut coeffs);
         }
@@ -125,7 +125,7 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
         // NTT to get evaluations
         if gpu_available {
             #[cfg(feature = "cuda")]
-            ntt_cuda(&mut evals).expect("CUDA NTT failed");
+            ntt_cuda(&mut evals, 1).expect("CUDA NTT failed");
         } else {
             ntt(&mut evals);
         }
@@ -170,7 +170,7 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
     y_coeffs.resize(ntt_n, BabyBear::zero());
     if gpu_available {
         #[cfg(feature = "cuda")]
-        intt_cuda(&mut y_coeffs).expect("CUDA INTT failed");
+        intt_cuda(&mut y_coeffs, 1).expect("CUDA INTT failed");
     } else {
         intt(&mut y_coeffs);
     }
@@ -179,7 +179,7 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
     let mut y_encoded = y_coeffs.clone();
     if gpu_available {
         #[cfg(feature = "cuda")]
-        ntt_cuda(&mut y_encoded).expect("CUDA NTT failed");
+        ntt_cuda(&mut y_encoded, 1).expect("CUDA NTT failed");
     } else {
         ntt(&mut y_encoded);
     }

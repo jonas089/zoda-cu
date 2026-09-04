@@ -1,7 +1,7 @@
 // CUDA NTT: FFI bindings and safe Rust wrapper.
 //
-// The C side (cuda/ntt_kernel.cu) owns all device memory. Each call copies the
-// host slice to the GPU, runs the transform, and copies the result back.
+// The C side (cuda/ntt_kernel.cu) owns all device memory. Values are row-major
+// [n rows][cols]: every column is an independent n-point transform.
 
 use crate::field::babybear::{BabyBear, BABYBEAR_PRIME};
 use crate::ntt::roots_of_unity;
@@ -11,8 +11,8 @@ const CUDA_SUCCESS: CudaError = 0;
 
 #[link(name = "ntt_cuda", kind = "static")]
 extern "C" {
-    fn cuda_ntt(values: *mut u32, roots: *const u32, n: u32) -> CudaError;
-    fn cuda_intt(values: *mut u32, roots: *const u32, n: u32) -> CudaError;
+    fn cuda_ntt(values: *mut u32, roots: *const u32, n: u32, cols: u32) -> CudaError;
+    fn cuda_intt(values: *mut u32, roots: *const u32, n: u32, cols: u32) -> CudaError;
     fn cudaGetDeviceCount(count: *mut i32) -> CudaError;
 }
 
@@ -25,10 +25,12 @@ pub fn cuda_available() -> bool {
 
 fn run(
     values: &mut [BabyBear],
-    f: unsafe extern "C" fn(*mut u32, *const u32, u32) -> CudaError,
+    cols: usize,
+    f: unsafe extern "C" fn(*mut u32, *const u32, u32, u32) -> CudaError,
     name: &str,
 ) -> Result<(), String> {
-    let n = values.len();
+    assert!(cols > 0 && values.len() % cols == 0, "values must be n rows of cols elements");
+    let n = values.len() / cols;
     assert!(n.is_power_of_two(), "NTT size must be power of 2");
 
     // The circle: roots[i] = omega^i for i in 0..n.
@@ -37,7 +39,7 @@ fn run(
     // BabyBear values are canonical (< 2^31), so they fit in u32 losslessly.
     let mut raw: Vec<u32> = values.iter().map(|v| v.value as u32).collect();
 
-    let err = unsafe { f(raw.as_mut_ptr(), roots.as_ptr(), n as u32) };
+    let err = unsafe { f(raw.as_mut_ptr(), roots.as_ptr(), n as u32, cols as u32) };
     if err != CUDA_SUCCESS {
         return Err(format!("{name} failed with CUDA error {err}"));
     }
@@ -48,14 +50,14 @@ fn run(
     Ok(())
 }
 
-/// Forward NTT on the GPU, in place.
-pub fn ntt_cuda(values: &mut [BabyBear]) -> Result<(), String> {
-    run(values, cuda_ntt, "cuda_ntt")
+/// Forward NTT on the GPU, in place. `values` is row-major `[n][cols]`; each column is transformed.
+pub fn ntt_cuda(values: &mut [BabyBear], cols: usize) -> Result<(), String> {
+    run(values, cols, cuda_ntt, "cuda_ntt")
 }
 
-/// Inverse NTT on the GPU, in place.
-pub fn intt_cuda(values: &mut [BabyBear]) -> Result<(), String> {
-    run(values, cuda_intt, "cuda_intt")
+/// Inverse NTT on the GPU, in place. Same layout as `ntt_cuda`.
+pub fn intt_cuda(values: &mut [BabyBear], cols: usize) -> Result<(), String> {
+    run(values, cols, cuda_intt, "cuda_intt")
 }
 
 #[cfg(test)]
@@ -75,7 +77,7 @@ mod tests {
             let mut gpu_values = cpu_values.clone();
 
             cpu_ntt(&mut cpu_values);
-            ntt_cuda(&mut gpu_values).unwrap();
+            ntt_cuda(&mut gpu_values, 1).unwrap();
 
             for (i, (c, g)) in cpu_values.iter().zip(&gpu_values).enumerate() {
                 assert_eq!(c.value, g.value, "n={n}: mismatch at {i}: CPU={} GPU={}", c.value, g.value);
@@ -91,7 +93,7 @@ mod tests {
             let mut gpu_values = cpu_values.clone();
 
             cpu_intt(&mut cpu_values);
-            intt_cuda(&mut gpu_values).unwrap();
+            intt_cuda(&mut gpu_values, 1).unwrap();
 
             for (i, (c, g)) in cpu_values.iter().zip(&gpu_values).enumerate() {
                 assert_eq!(c.value, g.value, "n={n}: mismatch at {i}: CPU={} GPU={}", c.value, g.value);
@@ -103,8 +105,8 @@ mod tests {
     fn test_cuda_roundtrip() {
         let original = sample(1 << 10);
         let mut values = original.clone();
-        ntt_cuda(&mut values).unwrap();
-        intt_cuda(&mut values).unwrap();
+        ntt_cuda(&mut values, 1).unwrap();
+        intt_cuda(&mut values, 1).unwrap();
         for (i, (o, r)) in original.iter().zip(&values).enumerate() {
             assert_eq!(o.value, r.value, "roundtrip failed at {i}");
         }
