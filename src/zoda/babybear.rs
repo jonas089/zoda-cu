@@ -100,38 +100,37 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
 
     // NTT domain (power-of-two)
     let ntt_n = data_square.rows.next_power_of_two();
+    let cols = data_square.columns;
 
-    let mut column_polys: Vec<Vec<BabyBear>> = Vec::new();
-    for column_idx in 0..data_square.columns {
-        let mut evals = data_square.get_column(column_idx);
-        evals.resize(ntt_n, BabyBear::zero());
-
-        // INTT to get coefficients
-        let mut coeffs = evals;
-        if gpu_available {
-            #[cfg(feature = "cuda")]
-            intt_cuda(&mut coeffs, 1).expect("CUDA INTT failed");
-        } else {
-            intt(&mut coeffs);
+    // All columns side by side, row-major: square[row * cols + col], zero-padded to ntt_n rows.
+    let mut square = vec![BabyBear::zero(); ntt_n * cols];
+    for col in 0..cols {
+        for (row, value) in data_square.get_column(col).into_iter().enumerate() {
+            square[row * cols + col] = value;
         }
+    }
 
-        column_polys.push(coeffs);
+    // INTT to get coefficients, NTT to get evaluations: every column in one call each.
+    if gpu_available {
+        #[cfg(feature = "cuda")]
+        intt_cuda(&mut square, cols).expect("CUDA INTT failed");
+        #[cfg(feature = "cuda")]
+        ntt_cuda(&mut square, cols).expect("CUDA NTT failed");
+    } else {
+        for col in 0..cols {
+            let mut column: Vec<BabyBear> = (0..ntt_n).map(|row| square[row * cols + col]).collect();
+            intt(&mut column);
+            ntt(&mut column);
+            for (row, value) in column.into_iter().enumerate() {
+                square[row * cols + col] = value;
+            }
+        }
     }
 
     let mut extended_data_square = BabyBearDataSquare::new(vec![], 0, 0);
-    for (col_idx, coeffs) in column_polys.into_iter().enumerate() {
-        let mut evals = coeffs;
-
-        // NTT to get evaluations
-        if gpu_available {
-            #[cfg(feature = "cuda")]
-            ntt_cuda(&mut evals, 1).expect("CUDA NTT failed");
-        } else {
-            ntt(&mut evals);
-        }
-
-        for (i, y) in evals.into_iter().enumerate() {
-            extended_data_square.set_cell(col_idx, i, y);
+    for col in 0..cols {
+        for row in 0..ntt_n {
+            extended_data_square.set_cell(col, row, square[row * cols + col]);
         }
     }
 

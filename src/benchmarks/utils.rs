@@ -79,39 +79,32 @@ pub fn encode_gpu_with_output(
 ) -> Result<(Vec<Vec<BabyBear>>, u64), String> {
     let k = config.k;
     let n = config.n;
-    let num_positions = config.num_positions();
+    let cols = config.num_positions();
     let ntt_size_k = config.ntt_size_k();
     let ntt_size_kn = config.ntt_size_kn();
 
-    // Un-batched baseline: every column is encoded with its own INTT -> pad -> NTT,
-    // each of which is a separate upload / kernel sequence / download. This is the
-    // simplest thing that works and is the reference point for batching later.
-    let mut encoded_columns: Vec<Vec<BabyBear>> = Vec::with_capacity(num_positions);
+    // All columns side by side, row-major: square[row * cols + col].
+    // Each column is INTT'd, zero-padded, and NTT'd by one GPU call over the whole square.
+    let mut square = vec![BabyBear::zero(); ntt_size_k * cols];
 
     let start = Instant::now();
 
-    for col in 0..num_positions {
-        let mut column: Vec<BabyBear> = (0..k)
-            .map(|row| BabyBear::new(((row * num_positions + col) % 2013265921) as u64))
-            .collect();
-
-        column.resize(ntt_size_k, BabyBear::zero());
-        intt_cuda(&mut column, 1)?;
-        column.resize(ntt_size_kn, BabyBear::zero());
-        ntt_cuda(&mut column, 1)?;
-
-        encoded_columns.push(column);
+    for row in 0..k {
+        for col in 0..cols {
+            square[row * cols + col] = BabyBear::new(((row * cols + col) % 2013265921) as u64);
+        }
     }
+
+    intt_cuda(&mut square, cols)?;
+    // Zero-padding every column to ntt_size_kn is appending zero rows.
+    square.resize(ntt_size_kn * cols, BabyBear::zero());
+    ntt_cuda(&mut square, cols)?;
 
     let elapsed_ns = start.elapsed().as_nanos() as u64;
 
-    // Convert output to row-major format
-    let mut encoded_rows: Vec<Vec<BabyBear>> = vec![vec![BabyBear::zero(); num_positions]; k + n];
-    for (col, column) in encoded_columns.iter().enumerate() {
-        for row in 0..(k + n) {
-            encoded_rows[row][col] = column[row];
-        }
-    }
+    let encoded_rows: Vec<Vec<BabyBear>> = (0..(k + n))
+        .map(|row| square[row * cols..(row + 1) * cols].to_vec())
+        .collect();
 
     Ok((encoded_rows, elapsed_ns))
 }
