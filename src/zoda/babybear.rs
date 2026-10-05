@@ -10,20 +10,38 @@ use std::cmp::max;
 #[cfg(feature = "cuda")]
 use crate::ntt::cuda::{cuda_available, intt_cuda, ntt_cuda, PinnedSquare};
 
-/// GPU transform of polynomials laid end to end, each `n` long, in place.
+/// GPU transform of polynomials laid end to end, each `stride` long, in place.
+/// Only the first `n` values of every polynomial are transformed.
 #[cfg(feature = "cuda")]
-fn gpu_transform(values: &mut [BabyBear], n: usize, inverse: bool) {
-    let mut square = PinnedSquare::new(n, values.len() / n).expect("pinned alloc failed");
+fn gpu_transform(values: &mut [BabyBear], n: usize, stride: usize, inverse: bool) {
+    let mut square =
+        PinnedSquare::new(stride, values.len() / stride).expect("pinned alloc failed");
     for (i, v) in values.iter().enumerate() {
         square[i] = v.value as u32;
     }
     if inverse {
-        intt_cuda(&mut square, n, n).expect("CUDA INTT failed");
+        intt_cuda(&mut square, n, stride).expect("CUDA INTT failed");
     } else {
-        ntt_cuda(&mut square, n, n).expect("CUDA NTT failed");
+        ntt_cuda(&mut square, n, stride).expect("CUDA NTT failed");
     }
     for (v, r) in values.iter_mut().zip(square.iter()) {
         *v = BabyBear::new(*r as u64);
+    }
+}
+
+/// Reed-Solomon extend polynomials laid end to end, each `n_kn` long with its
+/// data in the first `n_k` values: INTT those, then NTT all `n_kn`.
+fn extend(values: &mut [BabyBear], n_k: usize, n_kn: usize, gpu_available: bool) {
+    if gpu_available {
+        #[cfg(feature = "cuda")]
+        gpu_transform(values, n_k, n_kn, true);
+        #[cfg(feature = "cuda")]
+        gpu_transform(values, n_kn, n_kn, false);
+    } else {
+        for poly in values.chunks_mut(n_kn) {
+            intt(&mut poly[..n_k]);
+            ntt(poly);
+        }
     }
 }
 
@@ -116,36 +134,30 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
         }
     }
 
-    // NTT domain (power-of-two)
-    let ntt_n = data_square.rows.next_power_of_two();
+    // Interpolate the k data rows at size n_k, then evaluate at n_kn = 2 * n_k
+    // points. The NTT has to be larger than the INTT: at the same size the two
+    // cancel and the "encoding" hands back its input with no parity rows.
+    let k = data_square.rows;
+    let n_k = k.next_power_of_two();
+    let n_kn = (2 * k).next_power_of_two();
     let cols = data_square.columns;
 
-    // All columns one after another, each zero-padded to ntt_n values:
-    // column c is square[c * ntt_n .. (c + 1) * ntt_n].
-    let mut square = vec![BabyBear::zero(); ntt_n * cols];
+    // All columns one after another, each zero-padded to n_kn values:
+    // column c is square[c * n_kn .. (c + 1) * n_kn].
+    let mut square = vec![BabyBear::zero(); n_kn * cols];
     for col in 0..cols {
         for (row, value) in data_square.get_column(col).into_iter().enumerate() {
-            square[col * ntt_n + row] = value;
+            square[col * n_kn + row] = value;
         }
     }
 
-    // INTT to get coefficients, NTT to get evaluations: every column in one call each.
-    if gpu_available {
-        #[cfg(feature = "cuda")]
-        gpu_transform(&mut square, ntt_n, true);
-        #[cfg(feature = "cuda")]
-        gpu_transform(&mut square, ntt_n, false);
-    } else {
-        for column in square.chunks_mut(ntt_n) {
-            intt(column);
-            ntt(column);
-        }
-    }
+    // INTT over the first n_k rows of every column, NTT over all n_kn of them.
+    extend(&mut square, n_k, n_kn, gpu_available);
 
     let mut extended_data_square = BabyBearDataSquare::new(vec![], 0, 0);
     for col in 0..cols {
-        for row in 0..ntt_n {
-            extended_data_square.set_cell(col, row, square[col * ntt_n + row]);
+        for row in 0..n_kn {
+            extended_data_square.set_cell(col, row, square[col * n_kn + row]);
         }
     }
 
@@ -158,33 +170,45 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
 
     // The RLC of each original row, one sequence per limb, laid end to end so
     // every limb is extended in a single call each way.
-    let mut y = vec![BabyBear::zero(); RLC_LIMBS * ntt_n];
-    for row_idx in 0..data_square.rows {
-        let row_rlc = rlc_row(&extended_data_square.get_row(row_idx), &coefficients);
+    // The encoding is not systematic, so these are the rows of `data_square`,
+    // not the first k rows of the extended square.
+    let mut y = vec![BabyBear::zero(); RLC_LIMBS * n_kn];
+    for row_idx in 0..k {
+        let row_rlc = rlc_row(&data_square.get_row(row_idx), &coefficients);
         for limb in 0..RLC_LIMBS {
-            y[limb * ntt_n + row_idx] = row_rlc[limb];
+            y[limb * n_kn + row_idx] = row_rlc[limb];
         }
     }
 
     // Evaluate y over extended domain, limb by limb
-    if gpu_available {
-        #[cfg(feature = "cuda")]
-        gpu_transform(&mut y, ntt_n, true);
-        #[cfg(feature = "cuda")]
-        gpu_transform(&mut y, ntt_n, false);
-    } else {
-        for limb_poly in y.chunks_mut(ntt_n) {
-            intt(limb_poly);
-            ntt(limb_poly);
-        }
-    }
+    extend(&mut y, n_k, n_kn, gpu_available);
 
     for _ in 0..64 {
         let random_row = rand::rng().random_range(0..extended_data_square.rows);
         let row_rlc = rlc_row(&extended_data_square.get_row(random_row), &coefficients);
         for limb in 0..RLC_LIMBS {
-            assert_eq!(row_rlc[limb].value, y[limb * ntt_n + random_row].value);
+            assert_eq!(row_rlc[limb].value, y[limb * n_kn + random_row].value);
         }
+    }
+
+    // At least one parity row per data row; with n_kn == n_k the check below
+    // would pass vacuously on an identity "extension".
+    assert!(n_kn >= 2 * k, "no parity rows: {n_kn} rows for {k} data rows");
+
+    // Every column must be a codeword: a polynomial of degree < n_k, so its
+    // coefficients above n_k are zero. It must also be this data's codeword:
+    // INTT then NTT puts the data at every (n_kn / n_k)-th row.
+    let data_stride = n_kn / n_k;
+    for col in 0..cols {
+        for (row, value) in data_square.get_column(col).into_iter().enumerate() {
+            assert_eq!(square[col * n_kn + row * data_stride].value, value.value);
+        }
+        let mut coeffs = square[col * n_kn..(col + 1) * n_kn].to_vec();
+        intt(&mut coeffs);
+        assert!(
+            coeffs[n_k..].iter().all(|c| c.value == 0),
+            "column {col} is not a Reed-Solomon codeword"
+        );
     }
 
     start_time.elapsed()
