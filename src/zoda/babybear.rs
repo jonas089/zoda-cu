@@ -2,6 +2,7 @@
 
 use crate::field::babybear::BabyBear;
 use crate::ntt::{intt_babybear as intt, ntt_babybear as ntt};
+use crate::zoda::rlc::{generate_deterministic_coefficients, rlc_row, RLC_LIMBS};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::cmp::max;
@@ -150,62 +151,40 @@ pub fn run_zoda_test_babybear(data_size: usize, use_gpu: bool) -> std::time::Dur
 
     let encoded_data_square_root = extended_data_square.hash_root();
 
-    // Generate deterministic coefficients
-    let mut deterministic_coefficients: Vec<BabyBear> = (0..extended_data_square.rows)
-        .map(|i| {
-            let mut hasher = Sha256::new();
-            hasher.update(encoded_data_square_root.as_bytes());
-            hasher.update(&i.to_le_bytes());
-            let digest = hasher.finalize();
-            let val = u64::from_be_bytes([
-                digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
-                digest[7],
-            ]);
-            BabyBear::new(val)
-        })
-        .collect();
+    // One coefficient per column, each `RLC_LIMBS` base-field elements, so a
+    // forged row passes the check with probability `p^-RLC_LIMBS` rather than
+    // `1/p`. See `zoda::rlc`.
+    let coefficients = generate_deterministic_coefficients(&encoded_data_square_root, cols);
 
-    for i in 0..deterministic_coefficients.len() {
-        deterministic_coefficients[i] = deterministic_coefficients[i] + BabyBear::new(i as u64);
-    }
-
-    let mut y: Vec<BabyBear> = Vec::new();
+    // The RLC of each original row, one sequence per limb, laid end to end so
+    // every limb is extended in a single call each way.
+    let mut y = vec![BabyBear::zero(); RLC_LIMBS * ntt_n];
     for row_idx in 0..data_square.rows {
-        let row_data = extended_data_square.get_row(row_idx);
-        let mut running_sum = BabyBear::zero();
-        for (x, coeff) in row_data.iter().zip(deterministic_coefficients.iter()) {
-            running_sum = running_sum + (*x * *coeff);
+        let row_rlc = rlc_row(&extended_data_square.get_row(row_idx), &coefficients);
+        for limb in 0..RLC_LIMBS {
+            y[limb * ntt_n + row_idx] = row_rlc[limb];
         }
-        y.push(running_sum);
     }
 
-    let mut y_coeffs = y.clone();
-    y_coeffs.resize(ntt_n, BabyBear::zero());
+    // Evaluate y over extended domain, limb by limb
     if gpu_available {
         #[cfg(feature = "cuda")]
-        gpu_transform(&mut y_coeffs, ntt_n, true);
-    } else {
-        intt(&mut y_coeffs);
-    }
-
-    // Evaluate y over extended domain
-    let mut y_encoded = y_coeffs.clone();
-    if gpu_available {
+        gpu_transform(&mut y, ntt_n, true);
         #[cfg(feature = "cuda")]
-        gpu_transform(&mut y_encoded, ntt_n, false);
+        gpu_transform(&mut y, ntt_n, false);
     } else {
-        ntt(&mut y_encoded);
+        for limb_poly in y.chunks_mut(ntt_n) {
+            intt(limb_poly);
+            ntt(limb_poly);
+        }
     }
 
     for _ in 0..64 {
         let random_row = rand::rng().random_range(0..extended_data_square.rows);
-        let row_data = extended_data_square.get_row(random_row);
-        let mut running_sum = BabyBear::zero();
-        for (x, coeff) in row_data.iter().zip(deterministic_coefficients.iter()) {
-            running_sum = running_sum + (*x * *coeff);
+        let row_rlc = rlc_row(&extended_data_square.get_row(random_row), &coefficients);
+        for limb in 0..RLC_LIMBS {
+            assert_eq!(row_rlc[limb].value, y[limb * ntt_n + random_row].value);
         }
-
-        assert_eq!(running_sum.value, y_encoded[random_row].value);
     }
 
     start_time.elapsed()
